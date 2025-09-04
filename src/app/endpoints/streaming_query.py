@@ -627,13 +627,14 @@ async def streaming_query_endpoint_handler(  # pylint: disable=too-many-locals
                 llm_response="No response from the model", tool_calls=[]
             )
 
-            # Send start event
+            # Send start event - use the NEW response ID from the response object
             yield stream_start_event(conversation_id)
             
             logger.info("MCP DEBUGGING: Starting streaming response processing")
 
             async for chunk in turn_response:
                 p = chunk.event.payload
+                
                 logger.info("MCP DEBUGGING: Processing chunk %d, event_type: %s, step_type: %s", 
                            chunk_id, p.event_type, getattr(p, "step_type", "N/A"))
                 
@@ -643,6 +644,13 @@ async def streaming_query_endpoint_handler(  # pylint: disable=too-many-locals
                     )
                     logger.info("MCP DEBUGGING: Turn complete, final response: '%s'", 
                                summary.llm_response[:200] + "..." if len(summary.llm_response) > 200 else summary.llm_response)
+                    # Debug the output message structure for MCP tools
+                    logger.info("MCP DEBUGGING: Turn output message type: %s", type(p.turn.output_message).__name__)
+                    if hasattr(p.turn.output_message, 'content'):
+                        logger.info("MCP DEBUGGING: Output message has content: %s", type(p.turn.output_message.content))
+                    else:
+                        logger.info("MCP DEBUGGING: Output message does NOT have content attribute!")
+                        logger.info("MCP DEBUGGING: Output message attributes: %s", dir(p.turn.output_message))
                 elif p.event_type == "step_complete":
                     if p.step_details.step_type == "tool_execution":
                         logger.info("MCP DEBUGGING: Tool execution completed - %s", 
@@ -762,7 +770,7 @@ async def retrieve_response(
             tools.extend(rag_tools)
         
         # Add MCP server tools
-        mcp_tools = get_mcp_tools(configuration.mcp_servers)
+        mcp_tools = get_mcp_tools(configuration.mcp_servers, token)
         if mcp_tools:
             tools.extend(mcp_tools)
             has_mcp_tools = True
@@ -779,20 +787,23 @@ async def retrieve_response(
         validate_attachments_metadata(query_request.attachments)
     
     # Create streaming OpenAI response using responses API
-    # Note: responses API doesn't have "conversations" - each response is independent
-    # WORKAROUND: Avoid chaining when tools are present due to llama-stack bug
-    # with MCP tool outputs in conversation chaining
-    use_chaining = query_request.conversation_id and not tools
+    # Try to use conversation chaining with tools - fallback if it fails
+    logger.info("MCP DEBUGGING: Attempting conversation chaining - conversation_id: %s, tools: %d",
+               query_request.conversation_id, len(tools) if tools else 0)
     
     logger.info("MCP DEBUGGING: Creating streaming response with query: '%s' and %d tools", 
                query_request.query[:100] + "..." if len(query_request.query) > 100 else query_request.query,
                len(tools) if tools else 0)
     
+    # Create streaming response - always try to use conversation chaining
+    logger.info("MCP DEBUGGING: Creating response with conversation_id=%s, tools=%d", 
+                query_request.conversation_id, len(tools) if tools else 0)
+    
     response = await client.responses.create(
         input=query_request.query,
         model=model_id,
         instructions=system_prompt,
-        previous_response_id=query_request.conversation_id if use_chaining else None,
+        previous_response_id=query_request.conversation_id,
         tools=tools if tools else None,
         stream=True,
         store=True,
@@ -801,8 +812,10 @@ async def retrieve_response(
     
     logger.info("MCP DEBUGGING: Started streaming response, will extract ID from first chunk")
     
-    # For streaming, we'll extract the response ID from the stream
-    # Initially set to empty, will be updated from the first stream chunk
-    conversation_id = ""
+    # The response object has the ID directly, just like non-streaming
+    # This is the NEW response ID to use for the NEXT interaction
+    conversation_id = response.id if hasattr(response, 'id') else ""
+    
+    logger.info("MCP DEBUGGING: Created streaming response with ID: %s", conversation_id)
 
     return response, conversation_id

@@ -144,14 +144,30 @@ def get_rag_tools(vector_db_ids: list[str]) -> list[dict] | None:
     }]
 
 
-def get_mcp_tools(mcp_servers: list) -> list[dict]:
-    """Convert MCP servers to tools format for responses API."""
+def get_mcp_tools(mcp_servers: list, auth_token: str | None = None) -> list[dict]:
+    """Convert MCP servers to tools format for responses API.
+    
+    Args:
+        mcp_servers: List of MCP server configurations
+        auth_token: Optional auth token to add as Authorization header
+        
+    Returns:
+        List of MCP tool definitions with auth headers if token provided
+    """
     tools = []
     for mcp_server in mcp_servers:
-        tools.append({
+        tool_def = {
             "type": "mcp",
             "server_label": mcp_server.name,
             "server_url": mcp_server.url,
             "require_approval": "never"
-        })
+        }
+        
+        # Add auth header if token is provided
+        if auth_token:
+            tool_def["headers"] = {
+                "Authorization": f"Bearer {auth_token}"
+            }
+            
+        tools.append(tool_def)
     return tools

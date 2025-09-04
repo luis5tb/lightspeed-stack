@@ -449,7 +449,7 @@ async def retrieve_response(  # pylint: disable=too-many-locals,too-many-branche
             tools.extend(rag_tools)
 
         # Add MCP server tools
-        mcp_tools = get_mcp_tools(configuration.mcp_servers)
+        mcp_tools = get_mcp_tools(configuration.mcp_servers, token)
         if mcp_tools:
             tools.extend(mcp_tools)
             has_mcp_tools = True
@@ -466,20 +466,11 @@ async def retrieve_response(  # pylint: disable=too-many-locals,too-many-branche
         validate_attachments_metadata(query_request.attachments)
 
     # Create OpenAI response using responses API
-    # Note: responses API doesn't have "conversations" - each response is independent
-    # WORKAROUND: Avoid chaining when tools are present due to llama-stack bug
-    # with MCP tool outputs in conversation chaining
-    use_chaining = query_request.conversation_id and not tools
-
-    logger.info("MCP DEBUGGING: Creating response with query: '%s' and %d tools",
-               query_request.query[:100] + "..." if len(query_request.query) > 100 else query_request.query,
-               len(tools) if tools else 0)
-
     response = await client.responses.create(
         input=query_request.query,
         model=model_id,
         instructions=system_prompt,
-        previous_response_id=query_request.conversation_id if use_chaining else None,
+        previous_response_id=query_request.conversation_id,
         tools=tools if tools else None,
         stream=False,
         store=True,
@@ -488,7 +479,6 @@ async def retrieve_response(  # pylint: disable=too-many-locals,too-many-branche
 
     logger.info("MCP DEBUGGING: Received response with ID: %s, output items: %d",
                response.id, len(response.output))
-
     # Return the response ID - client can use it for chaining if desired
     conversation_id = response.id
 
