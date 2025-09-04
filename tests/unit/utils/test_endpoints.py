@@ -175,6 +175,32 @@ def test_get_system_prompt_with_disable_query_system_prompt_and_non_system_promp
     assert system_prompt == CONFIGURED_SYSTEM_PROMPT
 
 
+def test_get_system_prompt_with_mcp_tools(
+    config_without_system_prompt, query_request_without_system_prompt
+):
+    """Test that system prompt is enhanced when MCP tools are available."""
+    system_prompt = endpoints.get_system_prompt(
+        query_request_without_system_prompt, config_without_system_prompt, has_mcp_tools=True
+    )
+    expected = constants.DEFAULT_SYSTEM_PROMPT + (
+        "\n\nWhen answering questions, use the available tools to get accurate, "
+        "real-time information. If a user asks about clusters, resources, status, "
+        "or other infrastructure-related topics, use the tools to query the actual "
+        "system state rather than providing generic responses."
+    )
+    assert system_prompt == expected
+
+
+def test_get_system_prompt_without_mcp_tools(
+    config_without_system_prompt, query_request_without_system_prompt
+):
+    """Test that system prompt is not enhanced when MCP tools are not available."""
+    system_prompt = endpoints.get_system_prompt(
+        query_request_without_system_prompt, config_without_system_prompt, has_mcp_tools=False
+    )
+    assert system_prompt == constants.DEFAULT_SYSTEM_PROMPT
+
+
 @pytest.mark.asyncio
 async def test_get_agent_with_conversation_id(prepare_agent_mocks, mocker):
     """Test get_agent function when agent exists in llama stack."""

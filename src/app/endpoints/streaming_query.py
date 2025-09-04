@@ -8,14 +8,13 @@ from typing import Annotated, Any, AsyncIterator, Iterator, cast
 
 from llama_stack_client import APIConnectionError
 from llama_stack_client import AsyncLlamaStackClient  # type: ignore
-from llama_stack_client.types import UserMessage  # type: ignore
-
 from llama_stack_client.lib.agents.event_logger import interleaved_content_as_str
-from llama_stack_client.types.agents.agent_turn_response_stream_chunk import (
-    AgentTurnResponseStreamChunk,
-)
+# Removed unused AgentTurnResponseStreamChunk import - no longer needed for responses API
 from llama_stack_client.types.shared import ToolCall
 from llama_stack_client.types.shared.interleaved_content_item import TextContentItem
+from llama_stack.apis.agents.openai_responses import (
+    OpenAIResponseObjectStream,
+)
 
 from fastapi import APIRouter, HTTPException, Request, Depends, status
 from fastapi.responses import StreamingResponse
@@ -29,14 +28,18 @@ import metrics
 from models.config import Action
 from models.requests import QueryRequest
 from models.database.conversations import UserConversation
-from utils.endpoints import check_configuration_loaded, get_agent, get_system_prompt
-from utils.mcp_headers import mcp_headers_dependency, handle_mcp_headers_with_toolgroups
+from utils.endpoints import (
+    check_configuration_loaded, 
+    get_system_prompt,
+    get_rag_tools,
+    get_mcp_tools,
+)
+from utils.mcp_headers import mcp_headers_dependency
 from utils.transcripts import store_transcript
 from utils.types import TurnSummary
 from utils.endpoints import validate_model_provider_override
 
 from app.endpoints.query import (
-    get_rag_toolgroups,
     is_input_shield,
     is_output_shield,
     is_transcripts_enabled,
@@ -396,6 +399,7 @@ def _handle_tool_execution_event(
         events and responses.
     """
     if chunk.event.payload.event_type == "step_start":
+        logger.info("MCP DEBUGGING: Tool execution step started - chunk %d", chunk_id)
         yield format_stream_data(
             {
                 "event": "tool_call",
@@ -408,7 +412,13 @@ def _handle_tool_execution_event(
         )
 
     elif chunk.event.payload.event_type == "step_complete":
+        logger.info("MCP DEBUGGING: Tool execution step complete - %d tool calls, %d responses", 
+                   len(chunk.event.payload.step_details.tool_calls),
+                   len(chunk.event.payload.step_details.tool_responses))
+        
         for t in chunk.event.payload.step_details.tool_calls:
+            logger.info("MCP DEBUGGING: Tool call - Name: %s, Args: %s", 
+                       t.tool_name, str(t.arguments)[:100])
             yield format_stream_data(
                 {
                     "event": "tool_call",
@@ -424,6 +434,9 @@ def _handle_tool_execution_event(
             )
 
         for r in chunk.event.payload.step_details.tool_responses:
+            response_text = interleaved_content_as_str(r.content)
+            logger.info("MCP DEBUGGING: Tool response - Name: %s, Response: '%s'", 
+                       r.tool_name, response_text[:200] + "..." if len(response_text) > 200 else response_text)
             if r.tool_name == "query_from_memory":
                 inserted_context = interleaved_content_as_str(r.content)
                 yield format_stream_data(
@@ -596,7 +609,7 @@ async def streaming_query_endpoint_handler(  # pylint: disable=too-many-locals
         metadata_map: dict[str, dict[str, Any]] = {}
 
         async def response_generator(
-            turn_response: AsyncIterator[AgentTurnResponseStreamChunk],
+            turn_response: AsyncIterator[OpenAIResponseObjectStream],
         ) -> AsyncIterator[str]:
             """
             Generate SSE formatted streaming response.
@@ -616,20 +629,32 @@ async def streaming_query_endpoint_handler(  # pylint: disable=too-many-locals
 
             # Send start event
             yield stream_start_event(conversation_id)
+            
+            logger.info("MCP DEBUGGING: Starting streaming response processing")
 
             async for chunk in turn_response:
                 p = chunk.event.payload
+                logger.info("MCP DEBUGGING: Processing chunk %d, event_type: %s, step_type: %s", 
+                           chunk_id, p.event_type, getattr(p, "step_type", "N/A"))
+                
                 if p.event_type == "turn_complete":
                     summary.llm_response = interleaved_content_as_str(
                         p.turn.output_message.content
                     )
+                    logger.info("MCP DEBUGGING: Turn complete, final response: '%s'", 
+                               summary.llm_response[:200] + "..." if len(summary.llm_response) > 200 else summary.llm_response)
                 elif p.event_type == "step_complete":
                     if p.step_details.step_type == "tool_execution":
+                        logger.info("MCP DEBUGGING: Tool execution completed - %s", 
+                                   getattr(p.step_details, 'tool_call', {}).get('function', {}).get('name', 'unknown'))
                         summary.append_tool_calls_from_llama(p.step_details)
 
                 for event in stream_build_event(chunk, chunk_id, metadata_map):
                     chunk_id += 1
                     yield event
+            
+            logger.info("MCP DEBUGGING: Streaming complete - Tool calls: %d, Response chars: %d", 
+                       len(summary.tool_calls), len(summary.llm_response))
 
             yield stream_end_event(metadata_map)
 
@@ -682,7 +707,7 @@ async def retrieve_response(
     query_request: QueryRequest,
     token: str,
     mcp_headers: dict[str, dict[str, str]] | None = None,
-) -> tuple[AsyncIterator[AgentTurnResponseStreamChunk], str]:
+) -> tuple[AsyncIterator[OpenAIResponseObjectStream], str]:
     """
     Retrieve response from LLMs and agents.
 
@@ -722,69 +747,62 @@ async def retrieve_response(
             available_input_shields,
             available_output_shields,
         )
-    # use system prompt from request or default one
-    system_prompt = get_system_prompt(query_request, configuration)
+    # Prepare tools for responses API
+    tools = []
+    has_mcp_tools = False
+    if not query_request.no_tools:
+        # Get vector databases for RAG tools
+        vector_db_ids = [
+            vector_db.identifier for vector_db in await client.vector_dbs.list()
+        ]
+        
+        # Add RAG tools if vector databases are available
+        rag_tools = get_rag_tools(vector_db_ids)
+        if rag_tools:
+            tools.extend(rag_tools)
+        
+        # Add MCP server tools
+        mcp_tools = get_mcp_tools(configuration.mcp_servers)
+        if mcp_tools:
+            tools.extend(mcp_tools)
+            has_mcp_tools = True
+            logger.info("MCP DEBUGGING: Configured %d MCP tools: %s", 
+                       len(mcp_tools), [tool.get("server_label", "unknown") for tool in mcp_tools])
+
+    # use system prompt from request or default one, enhanced for tool usage
+    system_prompt = get_system_prompt(query_request, configuration, has_mcp_tools)
     logger.debug("Using system prompt: %s", system_prompt)
 
     # TODO(lucasagomes): redact attachments content before sending to LLM
     # if attachments are provided, validate them
     if query_request.attachments:
         validate_attachments_metadata(query_request.attachments)
-
-    agent, conversation_id, session_id = await get_agent(
-        client,
-        model_id,
-        system_prompt,
-        available_input_shields,
-        available_output_shields,
-        query_request.conversation_id,
-        query_request.no_tools or False,
-    )
-
-    logger.debug("Conversation ID: %s, session ID: %s", conversation_id, session_id)
-    # bypass tools and MCP servers if no_tools is True
-    if query_request.no_tools:
-        mcp_headers = {}
-        agent.extra_headers = {}
-        toolgroups = None
-    else:
-        # preserve compatibility when mcp_headers is not provided
-        if mcp_headers is None:
-            mcp_headers = {}
-
-        mcp_headers = handle_mcp_headers_with_toolgroups(mcp_headers, configuration)
-
-        if not mcp_headers and token:
-            for mcp_server in configuration.mcp_servers:
-                mcp_headers[mcp_server.url] = {
-                    "Authorization": f"Bearer {token}",
-                }
-
-        agent.extra_headers = {
-            "X-LlamaStack-Provider-Data": json.dumps(
-                {
-                    "mcp_headers": mcp_headers,
-                }
-            ),
-        }
-
-        vector_db_ids = [
-            vector_db.identifier for vector_db in await client.vector_dbs.list()
-        ]
-        toolgroups = (get_rag_toolgroups(vector_db_ids) or []) + [
-            mcp_server.name for mcp_server in configuration.mcp_servers
-        ]
-        # Convert empty list to None for consistency with existing behavior
-        if not toolgroups:
-            toolgroups = None
-
-    response = await agent.create_turn(
-        messages=[UserMessage(role="user", content=query_request.query)],
-        session_id=session_id,
-        documents=query_request.get_documents(),
+    
+    # Create streaming OpenAI response using responses API
+    # Note: responses API doesn't have "conversations" - each response is independent
+    # WORKAROUND: Avoid chaining when tools are present due to llama-stack bug
+    # with MCP tool outputs in conversation chaining
+    use_chaining = query_request.conversation_id and not tools
+    
+    logger.info("MCP DEBUGGING: Creating streaming response with query: '%s' and %d tools", 
+               query_request.query[:100] + "..." if len(query_request.query) > 100 else query_request.query,
+               len(tools) if tools else 0)
+    
+    response = await client.responses.create(
+        input=query_request.query,
+        model=model_id,
+        instructions=system_prompt,
+        previous_response_id=query_request.conversation_id if use_chaining else None,
+        tools=tools if tools else None,
         stream=True,
-        toolgroups=toolgroups,
+        store=True,
     )
-    response = cast(AsyncIterator[AgentTurnResponseStreamChunk], response)
+    response = cast(AsyncIterator[OpenAIResponseObjectStream], response)
+    
+    logger.info("MCP DEBUGGING: Started streaming response, will extract ID from first chunk")
+    
+    # For streaming, we'll extract the response ID from the stream
+    # Initially set to empty, will be updated from the first stream chunk
+    conversation_id = ""
 
     return response, conversation_id

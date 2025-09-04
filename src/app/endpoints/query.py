@@ -1,20 +1,16 @@
 """Handler for REST API call to provide answer to query."""
 
 from datetime import datetime, UTC
-import json
 import logging
 from typing import Annotated, Any, cast
 
 from llama_stack_client import APIConnectionError
 from llama_stack_client import AsyncLlamaStackClient  # type: ignore
-from llama_stack_client.lib.agents.event_logger import interleaved_content_as_str
-from llama_stack_client.types import UserMessage, Shield  # type: ignore
-from llama_stack_client.types.agents.turn import Turn
-from llama_stack_client.types.agents.turn_create_params import (
-    ToolgroupAgentToolGroupWithArgs,
-    Toolgroup,
-)
+from llama_stack_client.types import Shield  # type: ignore
 from llama_stack_client.types.model_list_response import ModelListResponse
+from llama_stack.apis.agents.openai_responses import (
+    OpenAIResponseObject,
+)
 
 from fastapi import APIRouter, HTTPException, Request, status, Depends
 
@@ -32,12 +28,13 @@ from models.requests import QueryRequest, Attachment
 from models.responses import QueryResponse, UnauthorizedResponse, ForbiddenResponse
 from utils.endpoints import (
     check_configuration_loaded,
-    get_agent,
     get_system_prompt,
     validate_conversation_ownership,
     validate_model_provider_override,
+    get_rag_tools,
+    get_mcp_tools,
 )
-from utils.mcp_headers import mcp_headers_dependency, handle_mcp_headers_with_toolgroups
+from utils.mcp_headers import mcp_headers_dependency
 from utils.transcripts import store_transcript
 from utils.types import TurnSummary
 
@@ -437,8 +434,30 @@ async def retrieve_response(  # pylint: disable=too-many-locals,too-many-branche
             available_input_shields,
             available_output_shields,
         )
-    # use system prompt from request or default one
-    system_prompt = get_system_prompt(query_request, configuration)
+    # Prepare tools for responses API
+    tools = []
+    has_mcp_tools = False
+    if not query_request.no_tools:
+        # Get vector databases for RAG tools
+        vector_db_ids = [
+            vector_db.identifier for vector_db in await client.vector_dbs.list()
+        ]
+
+        # Add RAG tools if vector databases are available
+        rag_tools = get_rag_tools(vector_db_ids)
+        if rag_tools:
+            tools.extend(rag_tools)
+
+        # Add MCP server tools
+        mcp_tools = get_mcp_tools(configuration.mcp_servers)
+        if mcp_tools:
+            tools.extend(mcp_tools)
+            has_mcp_tools = True
+            logger.info("MCP DEBUGGING: Configured %d MCP tools: %s",
+                       len(mcp_tools), [tool.get("server_label", "unknown") for tool in mcp_tools])
+
+    # use system prompt from request or default one, enhanced for tool usage
+    system_prompt = get_system_prompt(query_request, configuration, has_mcp_tools)
     logger.debug("Using system prompt: %s", system_prompt)
 
     # TODO(lucasagomes): redact attachments content before sending to LLM
@@ -446,84 +465,88 @@ async def retrieve_response(  # pylint: disable=too-many-locals,too-many-branche
     if query_request.attachments:
         validate_attachments_metadata(query_request.attachments)
 
-    agent, conversation_id, session_id = await get_agent(
-        client,
-        model_id,
-        system_prompt,
-        available_input_shields,
-        available_output_shields,
-        query_request.conversation_id,
-        query_request.no_tools or False,
-    )
+    # Create OpenAI response using responses API
+    # Note: responses API doesn't have "conversations" - each response is independent
+    # WORKAROUND: Avoid chaining when tools are present due to llama-stack bug
+    # with MCP tool outputs in conversation chaining
+    use_chaining = query_request.conversation_id and not tools
 
-    logger.debug("Conversation ID: %s, session ID: %s", conversation_id, session_id)
-    # bypass tools and MCP servers if no_tools is True
-    if query_request.no_tools:
-        mcp_headers = {}
-        agent.extra_headers = {}
-        toolgroups = None
-    else:
-        # preserve compatibility when mcp_headers is not provided
-        if mcp_headers is None:
-            mcp_headers = {}
-        mcp_headers = handle_mcp_headers_with_toolgroups(mcp_headers, configuration)
-        if not mcp_headers and token:
-            for mcp_server in configuration.mcp_servers:
-                mcp_headers[mcp_server.url] = {
-                    "Authorization": f"Bearer {token}",
-                }
+    logger.info("MCP DEBUGGING: Creating response with query: '%s' and %d tools",
+               query_request.query[:100] + "..." if len(query_request.query) > 100 else query_request.query,
+               len(tools) if tools else 0)
 
-        agent.extra_headers = {
-            "X-LlamaStack-Provider-Data": json.dumps(
-                {
-                    "mcp_headers": mcp_headers,
-                }
-            ),
-        }
-
-        vector_db_ids = [
-            vector_db.identifier for vector_db in await client.vector_dbs.list()
-        ]
-        toolgroups = (get_rag_toolgroups(vector_db_ids) or []) + [
-            mcp_server.name for mcp_server in configuration.mcp_servers
-        ]
-        # Convert empty list to None for consistency with existing behavior
-        if not toolgroups:
-            toolgroups = None
-
-    response = await agent.create_turn(
-        messages=[UserMessage(role="user", content=query_request.query)],
-        session_id=session_id,
-        documents=query_request.get_documents(),
+    response = await client.responses.create(
+        input=query_request.query,
+        model=model_id,
+        instructions=system_prompt,
+        previous_response_id=query_request.conversation_id if use_chaining else None,
+        tools=tools if tools else None,
         stream=False,
-        toolgroups=toolgroups,
+        store=True,
     )
-    response = cast(Turn, response)
+    response = cast(OpenAIResponseObject, response)
+
+    logger.info("MCP DEBUGGING: Received response with ID: %s, output items: %d",
+               response.id, len(response.output))
+
+    # Return the response ID - client can use it for chaining if desired
+    conversation_id = response.id
+
+    # Process OpenAI response format
+    llm_response = ""
+    tool_calls = []
+
+    for idx, output_item in enumerate(response.output):
+        logger.info("MCP DEBUGGING: Processing output item %d, type: %s", idx, type(output_item).__name__)
+
+        if hasattr(output_item, 'content') and output_item.content:
+            # Extract text content from message output
+            text_content = ""
+            if isinstance(output_item.content, list):
+                for content_item in output_item.content:
+                    if hasattr(content_item, 'text'):
+                        text_content += content_item.text
+                        llm_response += content_item.text
+            elif hasattr(output_item.content, 'text'):
+                text_content = output_item.content.text
+                llm_response += output_item.content.text
+            elif isinstance(output_item.content, str):
+                text_content = output_item.content
+                llm_response += output_item.content
+
+            if text_content:
+                logger.info("MCP DEBUGGING: Model response content: '%s'",
+                           text_content[:200] + "..." if len(text_content) > 200 else text_content)
+
+        # Process tool calls if present
+        if hasattr(output_item, 'tool_calls') and output_item.tool_calls:
+            logger.info("MCP DEBUGGING: Found %d tool calls in output item %d", len(output_item.tool_calls), idx)
+            for tool_idx, tool_call in enumerate(output_item.tool_calls):
+                tool_name = tool_call.function.name if hasattr(tool_call, 'function') else 'unknown'
+                tool_args = tool_call.function.arguments if hasattr(tool_call, 'function') else {}
+
+                logger.info("MCP DEBUGGING: Tool call %d - Name: %s, Args: %s",
+                           tool_idx, tool_name, str(tool_args)[:100])
+
+                from utils.types import ToolCallSummary
+                tool_calls.append(ToolCallSummary(
+                    id=tool_call.id if hasattr(tool_call, 'id') else str(len(tool_calls)),
+                    name=tool_name,
+                    args=tool_args,
+                    response=None  # Tool responses would be in subsequent output items
+                ))
+
+    logger.info("MCP DEBUGGING: Response processing complete - Tool calls: %d, Response length: %d chars",
+               len(tool_calls), len(llm_response))
 
     summary = TurnSummary(
-        llm_response=(
-            interleaved_content_as_str(response.output_message.content)
-            if (
-                getattr(response, "output_message", None) is not None
-                and getattr(response.output_message, "content", None) is not None
-            )
-            else ""
-        ),
-        tool_calls=[],
+        llm_response=llm_response,
+        tool_calls=tool_calls,
     )
-
-    # Check for validation errors in the response
-    steps = response.steps or []
-    for step in steps:
-        if step.step_type == "shield_call" and step.violation:
-            # Metric for LLM validation errors
-            metrics.llm_calls_validation_errors_total.inc()
-        if step.step_type == "tool_execution":
-            summary.append_tool_calls_from_llama(step)
 
     if not summary.llm_response:
         logger.warning(
-            "Response lacks output_message.content (conversation_id=%s)",
+            "Response lacks content (conversation_id=%s)",
             conversation_id,
         )
     return summary, conversation_id
@@ -561,31 +584,4 @@ def validate_attachments_metadata(attachments: list[Attachment]) -> None:
             )
 
 
-def get_rag_toolgroups(
-    vector_db_ids: list[str],
-) -> list[Toolgroup] | None:
-    """
-    Return a list of RAG Tool groups if the given vector DB list is not empty.
 
-    Generate a list containing a RAG knowledge search toolgroup if
-    vector database IDs are provided.
-
-    Parameters:
-        vector_db_ids (list[str]): List of vector database identifiers to include in the toolgroup.
-
-    Returns:
-        list[Toolgroup] | None: A list with a single RAG toolgroup if
-        vector_db_ids is non-empty; otherwise, None.
-    """
-    return (
-        [
-            ToolgroupAgentToolGroupWithArgs(
-                name="builtin::rag/knowledge_search",
-                args={
-                    "vector_db_ids": vector_db_ids,
-                },
-            )
-        ]
-        if vector_db_ids
-        else None
-    )

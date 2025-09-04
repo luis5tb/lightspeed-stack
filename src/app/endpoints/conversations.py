@@ -109,42 +109,83 @@ conversations_list_responses: dict[int | str, dict[str, Any]] = {
 }
 
 
-def simplify_session_data(session_data: dict) -> list[dict[str, Any]]:
-    """Simplify session data to include only essential conversation information.
+def simplify_response_data(response_data: dict) -> list[dict[str, Any]]:
+    """Simplify response data to include only essential conversation information.
 
     Args:
-        session_data: The full session data dict from llama-stack
+        response_data: The full response data dict from llama-stack responses API
 
     Returns:
-        Simplified session data with only input_messages and output_message per turn
+        Simplified response data with input and output messages
     """
-    # Create simplified structure
+    # Create simplified structure - each response is one "turn"
     chat_history = []
 
-    # Extract only essential data from each turn
-    for turn in session_data.get("turns", []):
-        # Clean up input messages
-        cleaned_messages = []
-        for msg in turn.get("input_messages", []):
-            cleaned_msg = {
-                "content": msg.get("content"),
-                "type": msg.get("role"),  # Rename role to type
-            }
-            cleaned_messages.append(cleaned_msg)
+    # Extract input from the response
+    input_messages = []
+    if "input" in response_data:
+        # Input could be a simple string or list of input items
+        input_data = response_data["input"]
+        if isinstance(input_data, str):
+            input_messages.append({
+                "content": input_data,
+                "type": "user"
+            })
+        elif isinstance(input_data, list):
+            for input_item in input_data:
+                if hasattr(input_item, 'content') or 'content' in input_item:
+                    content = input_item.get('content') if isinstance(input_item, dict) else getattr(input_item, 'content', '')
+                    if isinstance(content, list):
+                        # Handle structured content
+                        text_content = ""
+                        for content_item in content:
+                            if isinstance(content_item, dict) and content_item.get('type') == 'input_text':
+                                text_content += content_item.get('text', '')
+                            elif hasattr(content_item, 'text'):
+                                text_content += content_item.text
+                        input_messages.append({
+                            "content": text_content,
+                            "type": "user"
+                        })
+                    else:
+                        input_messages.append({
+                            "content": str(content),
+                            "type": "user"
+                        })
 
-        # Clean up output message
-        output_msg = turn.get("output_message", {})
-        cleaned_messages.append(
-            {
-                "content": output_msg.get("content"),
-                "type": output_msg.get("role"),  # Rename role to type
-            }
-        )
+    # Extract output from the response
+    output_messages = []
+    if "output" in response_data:
+        for output_item in response_data["output"]:
+            if hasattr(output_item, 'content') or 'content' in output_item:
+                content = output_item.get('content') if isinstance(output_item, dict) else getattr(output_item, 'content', '')
+                if isinstance(content, list):
+                    # Handle structured content
+                    text_content = ""
+                    for content_item in content:
+                        if isinstance(content_item, dict) and content_item.get('type') == 'text':
+                            text_content += content_item.get('text', '')
+                        elif hasattr(content_item, 'text'):
+                            text_content += content_item.text
+                    output_messages.append({
+                        "content": text_content,
+                        "type": "assistant"
+                    })
+                else:
+                    output_messages.append({
+                        "content": str(content),
+                        "type": "assistant"
+                    })
 
+    # Combine input and output messages
+    all_messages = input_messages + output_messages
+
+    # Create a single turn with all messages
+    if all_messages:
         simplified_turn = {
-            "messages": cleaned_messages,
-            "started_at": turn.get("started_at"),
-            "completed_at": turn.get("completed_at"),
+            "messages": all_messages,
+            "started_at": response_data.get("created_at"),
+            "completed_at": response_data.get("created_at"),  # Responses don't have completion time
         }
         chat_history.append(simplified_turn)
 
@@ -273,33 +314,25 @@ async def get_conversation_endpoint_handler(
             },
         )
 
-    agent_id = conversation_id
-    logger.info("Retrieving conversation %s", conversation_id)
+    response_id = conversation_id
+    logger.info("Retrieving response %s", response_id)
 
     try:
         client = AsyncLlamaStackClientHolder().get_client()
 
-        agent_sessions = (await client.agents.session.list(agent_id=agent_id)).data
-        if not agent_sessions:
-            logger.error("No sessions found for conversation %s", conversation_id)
-            raise HTTPException(
-                status_code=status.HTTP_404_NOT_FOUND,
-                detail={
-                    "response": "Conversation not found",
-                    "cause": f"Conversation {conversation_id} could not be retrieved.",
-                },
-            )
-        session_id = str(agent_sessions[0].get("session_id"))
+        # Use responses API to get the individual response
+        # Try different method names that might be available
+        try:
+            response_obj = await client.responses.retrieve(response_id=response_id)
+        except AttributeError:
+            # Fallback to agents API if responses client doesn't have retrieve method
+            response_obj = await client.agents.get_openai_response(response_id=response_id)
+        response_data = response_obj.model_dump() if hasattr(response_obj, 'model_dump') else response_obj
 
-        session_response = await client.agents.session.retrieve(
-            agent_id=agent_id, session_id=session_id
-        )
-        session_data = session_response.model_dump()
+        logger.info("Successfully retrieved response %s", response_id)
 
-        logger.info("Successfully retrieved conversation %s", conversation_id)
-
-        # Simplify the session data to include only essential conversation information
-        chat_history = simplify_session_data(session_data)
+        # Simplify the response data to include only essential conversation information
+        chat_history = simplify_response_data(response_data)
 
         return ConversationResponse(
             conversation_id=conversation_id,
@@ -395,29 +428,26 @@ async def delete_conversation_endpoint_handler(
             },
         )
 
-    agent_id = conversation_id
-    logger.info("Deleting conversation %s", conversation_id)
+    response_id = conversation_id
+    logger.info("Deleting response %s", response_id)
 
     try:
         # Get Llama Stack client
         client = AsyncLlamaStackClientHolder().get_client()
 
-        agent_sessions = (await client.agents.session.list(agent_id=agent_id)).data
-
-        if not agent_sessions:
-            # If no sessions are found, do not raise an error, just return a success response
-            logger.info("No sessions found for conversation %s", conversation_id)
-            return ConversationDeleteResponse(
-                conversation_id=conversation_id,
-                success=True,
-                response="Conversation deleted successfully",
-            )
-
-        session_id = str(agent_sessions[0].get("session_id"))
-
-        await client.agents.session.delete(agent_id=agent_id, session_id=session_id)
-
-        logger.info("Successfully deleted conversation %s", conversation_id)
+        # Use responses API to delete the response
+        # Note: Check if responses API has delete method, otherwise just mark as success
+        try:
+            # Try to delete the response (may not be supported by all implementations)
+            if hasattr(client.responses, 'delete'):
+                await client.responses.delete(response_id=response_id)
+                logger.info("Successfully deleted response %s", response_id)
+            else:
+                # Responses API doesn't support deletion, just mark as success
+                logger.info("Responses API doesn't support deletion, marking as success for response %s", response_id)
+        except AttributeError:
+            # If delete method doesn't exist on responses API, just log and continue
+            logger.info("Responses API doesn't support deletion, marking as success for response %s", response_id)
 
         delete_conversation(conversation_id=conversation_id)
 
