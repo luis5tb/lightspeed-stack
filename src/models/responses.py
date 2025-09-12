@@ -66,6 +66,12 @@ class QueryResponse(BaseModel):
         ],
     )
 
+    response_id: Optional[str] = Field(
+        None,
+        description="The response ID for conversation chaining (Response API)",
+        examples=["resp-969df299-371e-49eb-97dc-4c322e42edc2"],
+    )
+
     # provides examples for /docs endpoint
     model_config = {
         "json_schema_extra": {

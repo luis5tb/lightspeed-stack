@@ -1,6 +1,7 @@
 """User conversation models."""
 
 from datetime import datetime
+from typing import Optional
 
 from sqlalchemy.orm import Mapped, mapped_column
 from sqlalchemy import DateTime, func
@@ -34,3 +35,6 @@ class UserConversation(Base):  # pylint: disable=too-few-public-methods
 
     # The number of user messages in the conversation
     message_count: Mapped[int] = mapped_column(default=0)
+
+    # The last response ID for Response API conversation chaining
+    last_response_id: Mapped[Optional[str]] = mapped_column(nullable=True)
