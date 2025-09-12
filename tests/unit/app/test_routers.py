@@ -15,6 +15,7 @@ from app.endpoints import (
     shields,
     providers,
     query,
+    query_v2,
     health,
     config,
     feedback,
@@ -64,7 +65,7 @@ def test_include_routers() -> None:
     include_routers(app)
 
     # are all routers added?
-    assert len(app.routers) == 15
+    assert len(app.routers) == 16
     assert root.router in app.get_routers()
     assert info.router in app.get_routers()
     assert models.router in app.get_routers()
@@ -72,6 +73,7 @@ def test_include_routers() -> None:
     assert shields.router in app.get_routers()
     assert providers.router in app.get_routers()
     assert query.router in app.get_routers()
+    assert query_v2.router in app.get_routers()
     assert streaming_query.router in app.get_routers()
     assert config.router in app.get_routers()
     assert feedback.router in app.get_routers()
@@ -88,7 +90,7 @@ def test_check_prefixes() -> None:
     include_routers(app)
 
     # are all routers added?
-    assert len(app.routers) == 15
+    assert len(app.routers) == 16
     assert app.get_router_prefix(root.router) == ""
     assert app.get_router_prefix(info.router) == "/v1"
     assert app.get_router_prefix(models.router) == "/v1"
@@ -97,6 +99,7 @@ def test_check_prefixes() -> None:
     assert app.get_router_prefix(providers.router) == "/v1"
     assert app.get_router_prefix(query.router) == "/v1"
     assert app.get_router_prefix(streaming_query.router) == "/v1"
+    assert app.get_router_prefix(query_v2.router) == "/v2"
     assert app.get_router_prefix(config.router) == "/v1"
     assert app.get_router_prefix(feedback.router) == "/v1"
     assert app.get_router_prefix(health.router) == ""
