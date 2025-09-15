@@ -17,6 +17,7 @@ from authorization.middleware import authorize
 from client import AsyncLlamaStackClientHolder
 from configuration import configuration
 import metrics
+from metrics.utils import update_llm_token_count_from_turn
 from models.config import Action
 from models.database.conversations import UserConversation
 from models.requests import QueryRequest
@@ -97,6 +98,7 @@ async def query_endpoint_handler_v2(
             query_request,
             token,
             mcp_headers=mcp_headers,
+            provider_id=provider_id,
         )
         # Update metrics for the LLM call
         metrics.llm_calls_total.labels(provider_id, model_id).inc()
@@ -135,6 +137,7 @@ async def retrieve_response(  # pylint: disable=too-many-locals,too-many-branche
     query_request: QueryRequest,
     token: str,
     mcp_headers: dict[str, dict[str, str]] | None = None,
+    provider_id: str = "",
 ) -> tuple[TurnSummary, str]:
     """
     Retrieve response from LLMs and agents.
@@ -256,6 +259,10 @@ async def retrieve_response(  # pylint: disable=too-many-locals,too-many-branche
         llm_response=llm_response,
         tool_calls=tool_calls,
     )
+
+    # Update token count metrics for the LLM call
+    model_label = model_id.split("/", 1)[1] if "/" in model_id else model_id
+    update_llm_token_count_from_turn(response, model_label, provider_id, system_prompt)
 
     if not summary.llm_response:
         logger.warning(
