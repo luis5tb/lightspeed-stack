@@ -123,13 +123,14 @@ async def streaming_query_endpoint_handler_v2(  # pylint: disable=too-many-local
             """
             chunk_id = 0
             summary = TurnSummary(
-                llm_response="No response from the model", tool_calls=[]
+                llm_response="", tool_calls=[]
             )
             metadata_map: dict[str, dict[str, Any]] = {}
 
             # Accumulators for Responses API
             text_parts: list[str] = []
             tool_item_registry: dict[str, dict[str, str]] = {}
+            emitted_turn_complete = False
 
             # Handle conversation id and start event in-band on response.created
             conv_id = ""
@@ -171,6 +172,12 @@ async def streaming_query_endpoint_handler_v2(  # pylint: disable=too-many-local
                             }
                         )
                         chunk_id += 1
+
+                # Final text of the output (capture, but emit at response.completed)
+                elif event_type == "response.output_text.done":
+                    final_text = getattr(chunk, "text", "")
+                    if final_text:
+                        summary.llm_response = final_text
 
                 # Content part started - emit an empty token to kick off UI streaming if desired
                 elif event_type == "response.content_part.added":
@@ -230,8 +237,19 @@ async def streaming_query_endpoint_handler_v2(  # pylint: disable=too-many-local
 
                 # Completed response - capture final text if any
                 elif event_type == "response.completed":
-                    if text_parts:
-                        summary.llm_response = "".join(text_parts)
+                    if not emitted_turn_complete:
+                        final_message = summary.llm_response or "".join(text_parts)
+                        yield format_stream_data(
+                            {
+                                "event": "turn_complete",
+                                "data": {
+                                    "id": chunk_id,
+                                    "token": final_message,
+                                },
+                            }
+                        )
+                        chunk_id += 1
+                        emitted_turn_complete = True
 
                 # Ignore other event types for now; could add heartbeats if desired
 
