@@ -262,7 +262,7 @@ async def retrieve_response(  # pylint: disable=too-many-locals,too-many-branche
 
     # Update token count metrics for the LLM call
     model_label = model_id.split("/", 1)[1] if "/" in model_id else model_id
-    update_llm_token_count_from_turn(response, model_label, provider_id, system_prompt)
+    #update_llm_token_count_from_turn(response, model_label, provider_id, system_prompt)
 
     if not summary.llm_response:
         logger.warning(
