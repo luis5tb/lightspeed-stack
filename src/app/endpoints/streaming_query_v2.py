@@ -131,14 +131,30 @@ async def streaming_query_endpoint_handler_v2(  # pylint: disable=too-many-local
             text_parts: list[str] = []
             tool_item_registry: dict[str, dict[str, str]] = {}
 
-            # Send start event
-            yield stream_start_event(conversation_id)
+            # Handle conversation id and start event in-band on response.created
+            conv_id = ""
 
             logger.debug("Starting streaming response (Responses API) processing")
 
             async for chunk in turn_response:
                 event_type = getattr(chunk, "type", None)
                 logger.debug("Processing chunk %d, type: %s", chunk_id, event_type)
+
+                # Emit start and persist on response.created
+                if event_type == "response.created":
+                    try:
+                        conv_id = getattr(chunk, "response").id
+                    except Exception:
+                        conv_id = ""
+                    yield stream_start_event(conv_id)
+                    if conv_id:
+                        persist_user_conversation_details(
+                            user_id=user_id,
+                            conversation_id=conv_id,
+                            model=model_id,
+                            provider_id=provider_id,
+                        )
+                    continue
 
                 # Text streaming
                 if event_type == "response.output_text.delta":
@@ -232,7 +248,7 @@ async def streaming_query_endpoint_handler_v2(  # pylint: disable=too-many-local
             else:
                 store_transcript(
                     user_id=user_id,
-                    conversation_id=conversation_id,
+                    conversation_id=conv_id,
                     model_id=model_id,
                     provider_id=provider_id,
                     query_is_valid=True,  # TODO(lucasagomes): implement as part of query validation
@@ -245,12 +261,7 @@ async def streaming_query_endpoint_handler_v2(  # pylint: disable=too-many-local
                     attachments=query_request.attachments or [],
                 )
 
-        persist_user_conversation_details(
-            user_id=user_id,
-            conversation_id=conversation_id,
-            model=model_id,
-            provider_id=provider_id,
-        )
+        # Conversation persistence is handled inside the stream once the response.created event provides the ID
 
         # Update metrics for the LLM call
         metrics.llm_calls_total.labels(provider_id, model_id).inc()
@@ -342,9 +353,8 @@ async def retrieve_response(
         store=True,
     )
 
-    # Return the response ID - client can use it for chaining if desired
-    conversation_id = response.id
-
     response = cast(AsyncIterator[OpenAIResponseObjectStream], response)
 
-    return response, conversation_id
+    # For streaming responses, the ID arrives in the first 'response.created' chunk
+    # Return empty conversation_id here; it will be set once the first chunk is received
+    return response, ""
