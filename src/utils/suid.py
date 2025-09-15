@@ -13,15 +13,22 @@ def get_suid() -> str:
 
 
 def check_suid(suid: str) -> bool:
-    """Check if given string is a proper session ID.
+    """Check if given string is a proper session ID or response ID.
 
     Args:
         suid: The string to check.
 
-    Returns True if the string is a valid UUID, False otherwise.
+    Returns True if the string is a valid UUID or response ID, False otherwise.
     """
     try:
-        # accepts strings and bytes only
+       # Check for responses API format (resp-<uuid>)
+        if suid.startswith("resp-"):
+            # Strip the "resp-" prefix and validate the UUID part
+            uuid_part = suid[5:]  # Remove "resp-" prefix
+            uuid.UUID(uuid_part)
+            return True
+        
+        # Check for regular UUID format: accepts strings and bytes only
         uuid.UUID(suid)
         return True
     except (ValueError, TypeError):
