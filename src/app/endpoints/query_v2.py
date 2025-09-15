@@ -1,7 +1,7 @@
 """Handler for REST API call to provide answer to query using Response API."""
 
 import logging
-from typing import Annotated
+from typing import Annotated, cast
 
 from llama_stack_client import AsyncLlamaStackClient  # type: ignore
 from llama_stack_client import APIConnectionError
@@ -13,9 +13,11 @@ from fastapi import APIRouter, HTTPException, Request, status, Depends
 
 from auth import get_auth_dependency
 from auth.interface import AuthTuple
+from authorization.middleware import authorize
 from client import AsyncLlamaStackClientHolder
 from configuration import configuration
 import metrics
+from models.config import Action
 from models.database.conversations import UserConversation
 from models.requests import QueryRequest
 from models.responses import QueryResponse
