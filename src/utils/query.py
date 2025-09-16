@@ -10,7 +10,7 @@ from llama_stack_client.types import Shield
 
 from fastapi import HTTPException, Request, status, Depends
 
-from auth.interface import AuthTuple
+from authentication.interface import AuthTuple
 from configuration import configuration
 from app.database import get_session
 import metrics
@@ -294,7 +294,7 @@ def validate_query_request(
 ) -> tuple[str, UserConversation | None]:
     """
     Validate query request and return user_id and user_conversation.
-    
+
     Returns:
         tuple: (user_id, user_conversation)
     """
