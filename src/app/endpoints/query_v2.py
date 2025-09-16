@@ -11,8 +11,8 @@ from llama_stack.apis.agents.openai_responses import (
 
 from fastapi import APIRouter, HTTPException, Request, status, Depends
 
-from auth import get_auth_dependency
-from auth.interface import AuthTuple
+from authentication import get_auth_dependency
+from authentication.interface import AuthTuple
 from authorization.middleware import authorize
 from client import AsyncLlamaStackClientHolder
 from configuration import configuration
@@ -34,8 +34,6 @@ from utils.query import (
     query_response,
     select_model_and_provider_id,
     validate_attachments_metadata,
-    
-
 )
 from utils.types import TurnSummary, ToolCallSummary
 
@@ -293,12 +291,12 @@ def get_mcp_tools(mcp_servers: list, token: str | None = None) -> list[dict]:
             "server_url": mcp_server.url,
             "require_approval": "never"
         }
-        
+
         # Add authentication if token provided (Response API format)
         if token:
             tool_def["headers"] = {
                 "Authorization": f"Bearer {token}"
             }
-            
+
         tools.append(tool_def)
     return tools

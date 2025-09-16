@@ -5,7 +5,7 @@ from typing import Any
 
 from fastapi import APIRouter, Depends, Request
 
-from auth import get_auth_dependency
+from authentication import get_auth_dependency
 from authorization.middleware import authorize
 from models.config import Action
 from models.responses import (

@@ -13,8 +13,8 @@ from fastapi import APIRouter, Depends, Request, HTTPException
 from starlette import status
 from fastapi.responses import StreamingResponse
 
-from auth import get_auth_dependency
-from auth.interface import AuthTuple
+from authentication import get_auth_dependency
+from authentication.interface import AuthTuple
 from authorization.middleware import authorize
 from client import AsyncLlamaStackClientHolder
 from configuration import configuration
