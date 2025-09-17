@@ -70,9 +70,7 @@ async def test_retrieve_response_no_tools_bypasses_tools(mocker):
     mocker.patch("app.endpoints.query_v2.configuration", mocker.Mock(mcp_servers=[]))
 
     qr = QueryRequest(query="hello", no_tools=True)
-    summary, conv_id = await retrieve_response(
-        mock_client, "model-x", qr, token="tkn"
-    )
+    summary, conv_id = await retrieve_response(mock_client, "model-x", qr, token="tkn")
 
     assert conv_id == "resp-1"
     assert summary.llm_response == ""
@@ -148,9 +146,7 @@ async def test_retrieve_response_parses_output_and_tool_calls(mocker):
     mocker.patch("app.endpoints.query_v2.configuration", mocker.Mock(mcp_servers=[]))
 
     qr = QueryRequest(query="hello")
-    summary, conv_id = await retrieve_response(
-        mock_client, "model-z", qr, token="tkn"
-    )
+    summary, conv_id = await retrieve_response(mock_client, "model-z", qr, token="tkn")
 
     assert conv_id == "resp-3"
     assert summary.llm_response == "Hello world!"
@@ -181,9 +177,7 @@ async def test_retrieve_response_validates_attachments(mocker):
     ]
 
     qr = QueryRequest(query="hello", attachments=attachments)
-    _summary, _cid = await retrieve_response(
-        mock_client, "model-a", qr, token="tkn"
-    )
+    _summary, _cid = await retrieve_response(mock_client, "model-a", qr, token="tkn")
 
     validate_spy.assert_called_once()
 
@@ -258,5 +252,3 @@ async def test_query_endpoint_handler_v2_api_connection_error(mocker, dummy_requ
     assert exc.value.status_code == status.HTTP_500_INTERNAL_SERVER_ERROR
     assert "Unable to connect to Llama Stack" in str(exc.value.detail)
     fail_metric.inc.assert_called_once()
-
-
