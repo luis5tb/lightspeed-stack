@@ -29,7 +29,9 @@ router = APIRouter(tags=["conversations_v2"])
 auth_dependency = get_auth_dependency()
 
 
-async def get_response_sessions(_client, _conversation_id: str):
+async def get_response_sessions(
+    _client: Any, _conversation_id: str
+) -> list[dict[str, str]]:
     """Placeholder for Response API session listing.
 
     For now, we rely on the shared base which works without direct
@@ -40,7 +42,9 @@ async def get_response_sessions(_client, _conversation_id: str):
     ]
 
 
-async def delete_response_sessions(_client, _conversation_id: str, _sessions):
+async def delete_response_sessions(
+    _client: Any, _conversation_id: str, _sessions: list[dict[str, str]]
+) -> None:
     """Placeholder for Response API session deletion."""
     return None
 
@@ -95,5 +99,3 @@ async def delete_conversation_endpoint_handler_v2(
         get_session_func=get_response_sessions,
         delete_session_func=delete_response_sessions,
     )
-
-

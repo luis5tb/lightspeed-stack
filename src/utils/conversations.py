@@ -1,7 +1,7 @@
 """Utility functions for conversation management endpoints."""
 
 import logging
-from typing import Any
+from typing import Any, Callable, Awaitable
 
 from llama_stack_client import APIConnectionError, NotFoundError
 
@@ -16,7 +16,6 @@ from models.responses import (
     ConversationDeleteResponse,
     ConversationsListResponse,
     ConversationDetails,
-    UnauthorizedResponse,
 )
 from utils.endpoints import (
     check_configuration_loaded,
@@ -255,13 +254,11 @@ def validate_conversation_access(
     others_allowed_action = (
         action_read_others if action_delete_others is None else action_delete_others
     )
-    
+
     user_conversation = validate_conversation_ownership(
         user_id=user_id,
         conversation_id=conversation_id,
-        others_allowed=(
-            others_allowed_action in request.state.authorized_actions
-        ),
+        others_allowed=(others_allowed_action in request.state.authorized_actions),
     )
 
     if user_conversation is None:
@@ -283,12 +280,12 @@ def validate_conversation_access(
     return user_conversation
 
 
-def delete_conversation_base(
+async def delete_conversation_base(
     request: Request,
     conversation_id: str,
     auth: Any,
-    get_session_func: callable,
-    delete_session_func: callable,
+    get_session_func: Callable[[Any, str], Awaitable[list[Any]]],
+    delete_session_func: Callable[[Any, str, list[Any]], Awaitable[None]],
 ) -> ConversationDeleteResponse:
     """
     Handle request to delete a conversation by ID.
@@ -313,7 +310,7 @@ def delete_conversation_base(
 
     user_id = auth[0]
 
-    user_conversation = validate_conversation_access(
+    validate_conversation_access(
         user_id=user_id,
         conversation_id=conversation_id,
         request=request,
@@ -328,7 +325,7 @@ def delete_conversation_base(
         client = AsyncLlamaStackClientHolder().get_client()
 
         # Get sessions for the conversation
-        sessions = get_session_func(client, conversation_id)
+        sessions = await get_session_func(client, conversation_id)
 
         if not sessions:
             # If no sessions are found, do not raise an error, just return a success response
@@ -340,7 +337,7 @@ def delete_conversation_base(
             )
 
         # Delete the session(s)
-        delete_session_func(client, conversation_id, sessions)
+        await delete_session_func(client, conversation_id, sessions)
 
         logger.info("Successfully deleted conversation %s", conversation_id)
 

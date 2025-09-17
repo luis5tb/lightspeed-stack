@@ -504,7 +504,7 @@ def process_streaming_response(
     Yields start, token, tool call, turn completion, and
     end events as SSE-formatted strings. Collects the
     complete response for transcript storage if enabled.
-    
+
     Parameters:
         turn_response: The async iterator of streaming chunks
         conversation_id: The conversation ID
@@ -512,15 +512,14 @@ def process_streaming_response(
         configuration: The system configuration
         model_id: The model identifier
         provider_id: The provider identifier
-        
+
     Returns:
         AsyncIterator[str]: Stream of SSE-formatted strings
     """
+
     async def response_generator() -> AsyncIterator[str]:
         chunk_id = 0
-        summary = TurnSummary(
-            llm_response="No response from the model", tool_calls=[]
-        )
+        summary = TurnSummary(llm_response="No response from the model", tool_calls=[])
         metadata_map: dict[str, dict[str, Any]] = {}
 
         # Send start event

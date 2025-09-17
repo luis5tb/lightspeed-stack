@@ -12,11 +12,13 @@ from llama_stack_client.types import UserMessage  # type: ignore
 from llama_stack_client.types.agents.agent_turn_response_stream_chunk import (
     AgentTurnResponseStreamChunk,
 )
-from llama_stack_client.types.model_list_response import ModelListResponse
 
 from fastapi import APIRouter, HTTPException, Request, status, Depends
 from fastapi.responses import StreamingResponse
 
+from app.endpoints.query import (
+    get_rag_toolgroups,
+)
 from authentication import get_auth_dependency
 from authentication.interface import AuthTuple
 from authorization.middleware import authorize
@@ -24,19 +26,20 @@ from client import AsyncLlamaStackClientHolder
 from configuration import configuration
 import metrics
 from metrics.utils import update_llm_token_count_from_turn
-from authorization.middleware import authorize
 from models.config import Action
 from models.requests import QueryRequest
 from models.responses import UnauthorizedResponse, ForbiddenResponse
 from models.database.conversations import UserConversation
-from utils.endpoints import check_configuration_loaded, get_agent, get_system_prompt, validate_model_provider_override, validate_conversation_ownership
+from utils.endpoints import (
+    check_configuration_loaded,
+    get_agent,
+    get_system_prompt,
+    validate_model_provider_override,
+    validate_conversation_ownership,
+)
 from utils.mcp_headers import mcp_headers_dependency, handle_mcp_headers_with_toolgroups
 from utils.transcripts import store_transcript
 from utils.types import TurnSummary
-
-from app.endpoints.query import (
-    get_rag_toolgroups,
-)
 from utils.query import (
     is_input_shield,
     is_output_shield,
@@ -47,7 +50,6 @@ from utils.query import (
     evaluate_model_hints,
 )
 from utils.streaming_query import (
-    format_stream_data,
     stream_start_event,
     stream_end_event,
     stream_build_event,

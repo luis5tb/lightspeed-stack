@@ -1,7 +1,7 @@
 """Handler for REST API call to provide answer to query using Response API."""
 
 import logging
-from typing import Annotated, cast
+from typing import Annotated, Any, cast
 
 from llama_stack_client import AsyncLlamaStackClient  # type: ignore
 from llama_stack_client import APIConnectionError
@@ -17,15 +17,11 @@ from authorization.middleware import authorize
 from client import AsyncLlamaStackClientHolder
 from configuration import configuration
 import metrics
-from metrics.utils import update_llm_token_count_from_turn
 from models.config import Action
-from models.database.conversations import UserConversation
 from models.requests import QueryRequest
 from models.responses import QueryResponse
 from utils.endpoints import (
-    check_configuration_loaded,
     get_system_prompt,
-    validate_model_provider_override,
 )
 from utils.mcp_headers import mcp_headers_dependency
 from utils.query import (
@@ -34,6 +30,7 @@ from utils.query import (
     query_response,
     select_model_and_provider_id,
     validate_attachments_metadata,
+    validate_query_request,
 )
 from utils.types import TurnSummary, ToolCallSummary
 
@@ -66,20 +63,10 @@ async def query_endpoint_handler_v2(
     Returns:
         QueryResponse: Contains the conversation ID and the LLM-generated response.
     """
-    check_configuration_loaded(configuration)
-
-    # Enforce RBAC: optionally disallow overriding model/provider in requests
-    validate_model_provider_override(query_request, request.state.authorized_actions)
-
-    # log Llama Stack configuration
-    logger.info("Llama stack config: %s", configuration.llama_stack_configuration)
-
-    user_id, _, _, token = auth
-
-    user_conversation: UserConversation | None = None
-    if query_request.conversation_id:
-        # TODO: Implement conversation once Llama Stack supports its API
-        pass
+    # Validate request and get user info
+    user_id, user_conversation, token = validate_query_request(
+        request, query_request, auth
+    )
 
     try:
         # try to get Llama Stack client
@@ -174,7 +161,7 @@ async def retrieve_response(  # pylint: disable=too-many-locals,too-many-branche
         validate_attachments_metadata(query_request.attachments)
 
     # Prepare tools for responses API
-    tools = []
+    tools: list[dict[str, Any]] = []
     if not query_request.no_tools:
         # Get vector databases for RAG tools
         vector_db_ids = [
@@ -190,9 +177,11 @@ async def retrieve_response(  # pylint: disable=too-many-locals,too-many-branche
         mcp_tools = get_mcp_tools(configuration.mcp_servers, token)
         if mcp_tools:
             tools.extend(mcp_tools)
-            logger.debug("Configured %d MCP tools: %s",
-                       len(mcp_tools), [tool.get("server_label", "unknown") for tool in mcp_tools])
-
+            logger.debug(
+                "Configured %d MCP tools: %s",
+                len(mcp_tools),
+                [tool.get("server_label", "unknown") for tool in mcp_tools],
+            )
 
     # Create OpenAI response using responses API
     response = await client.responses.create(
@@ -200,58 +189,94 @@ async def retrieve_response(  # pylint: disable=too-many-locals,too-many-branche
         model=model_id,
         instructions=system_prompt,
         previous_response_id=query_request.conversation_id,
-        tools=tools if tools else None,
+        tools=(cast(Any, tools) if tools else cast(Any, None)),
         stream=False,
         store=True,
     )
     response = cast(OpenAIResponseObject, response)
 
-    logger.debug("Received response with ID: %s, output items: %d",
-               response.id, len(response.output))
+    logger.debug(
+        "Received response with ID: %s, output items: %d",
+        response.id,
+        len(response.output),
+    )
     # Return the response ID - client can use it for chaining if desired
     conversation_id = response.id
 
     # Process OpenAI response format
     llm_response = ""
-    tool_calls = []
+    tool_calls: list[ToolCallSummary] = []
 
     for idx, output_item in enumerate(response.output):
-        logger.debug("Processing output item %d, type: %s", idx, type(output_item).__name__)
+        logger.debug(
+            "Processing output item %d, type: %s", idx, type(output_item).__name__
+        )
 
-        if hasattr(output_item, 'content') and output_item.content:
+        if hasattr(output_item, "content") and output_item.content:
             # Extract text content from message output
             if isinstance(output_item.content, list):
                 for content_item in output_item.content:
-                    if hasattr(content_item, 'text'):
+                    if hasattr(content_item, "text"):
                         llm_response += content_item.text
-            elif hasattr(output_item.content, 'text'):
+            elif hasattr(output_item.content, "text"):
                 llm_response += output_item.content.text
             elif isinstance(output_item.content, str):
                 llm_response += output_item.content
 
             if llm_response:
-                logger.info("Model response content: '%s'",
-                           llm_response[:200] + "..." if len(llm_response) > 200 else llm_response)
+                logger.info(
+                    "Model response content: '%s'",
+                    (
+                        llm_response[:200] + "..."
+                        if len(llm_response) > 200
+                        else llm_response
+                    ),
+                )
 
         # Process tool calls if present
-        if hasattr(output_item, 'tool_calls') and output_item.tool_calls:
-            logger.debug("Found %d tool calls in output item %d", len(output_item.tool_calls), idx)
+        if hasattr(output_item, "tool_calls") and output_item.tool_calls:
+            logger.debug(
+                "Found %d tool calls in output item %d",
+                len(output_item.tool_calls),
+                idx,
+            )
             for tool_idx, tool_call in enumerate(output_item.tool_calls):
-                tool_name = tool_call.function.name if hasattr(tool_call, 'function') else 'unknown'
-                tool_args = tool_call.function.arguments if hasattr(tool_call, 'function') else {}
+                tool_name = (
+                    tool_call.function.name
+                    if hasattr(tool_call, "function")
+                    else "unknown"
+                )
+                tool_args = (
+                    tool_call.function.arguments
+                    if hasattr(tool_call, "function")
+                    else {}
+                )
 
-                logger.debug("Tool call %d - Name: %s, Args: %s",
-                           tool_idx, tool_name, str(tool_args)[:100])
+                logger.debug(
+                    "Tool call %d - Name: %s, Args: %s",
+                    tool_idx,
+                    tool_name,
+                    str(tool_args)[:100],
+                )
 
-                tool_calls.append(ToolCallSummary(
-                    id=tool_call.id if hasattr(tool_call, 'id') else str(len(tool_calls)),
-                    name=tool_name,
-                    args=tool_args,
-                    response=None  # Tool responses would be in subsequent output items
-                ))
+                tool_calls.append(
+                    ToolCallSummary(
+                        id=(
+                            tool_call.id
+                            if hasattr(tool_call, "id")
+                            else str(len(tool_calls))
+                        ),
+                        name=tool_name,
+                        args=tool_args,
+                        response=None,  # Tool responses would be in subsequent output items
+                    )
+                )
 
-    logger.info("Response processing complete - Tool calls: %d, Response length: %d chars",
-               len(tool_calls), len(llm_response))
+    logger.info(
+        "Response processing complete - Tool calls: %d, Response length: %d chars",
+        len(tool_calls),
+        len(llm_response),
+    )
 
     summary = TurnSummary(
         llm_response=llm_response,
@@ -259,8 +284,8 @@ async def retrieve_response(  # pylint: disable=too-many-locals,too-many-branche
     )
 
     # Update token count metrics for the LLM call
-    model_label = model_id.split("/", 1)[1] if "/" in model_id else model_id
-    #update_llm_token_count_from_turn(response, model_label, provider_id, system_prompt)
+    # model_label = model_id.split("/", 1)[1] if "/" in model_id else model_id
+    # update_llm_token_count_from_turn(response, model_label, provider_id, system_prompt)
 
     if not summary.llm_response:
         logger.warning(
@@ -269,19 +294,22 @@ async def retrieve_response(  # pylint: disable=too-many-locals,too-many-branche
         )
     return summary, conversation_id
 
-def get_rag_tools(vector_db_ids: list[str]) -> list[dict] | None:
+
+def get_rag_tools(vector_db_ids: list[str]) -> list[dict[str, Any]] | None:
     """Convert vector DB IDs to tools format for responses API."""
     if not vector_db_ids:
         return None
 
-    return [{
-        "type": "file_search",
-        "vector_store_ids": vector_db_ids,
-        "max_num_results": 10
-    }]
+    return [
+        {
+            "type": "file_search",
+            "vector_store_ids": vector_db_ids,
+            "max_num_results": 10,
+        }
+    ]
 
 
-def get_mcp_tools(mcp_servers: list, token: str | None = None) -> list[dict]:
+def get_mcp_tools(mcp_servers: list, token: str | None = None) -> list[dict[str, Any]]:
     """Convert MCP servers to tools format for responses API."""
     tools = []
     for mcp_server in mcp_servers:
@@ -289,14 +317,12 @@ def get_mcp_tools(mcp_servers: list, token: str | None = None) -> list[dict]:
             "type": "mcp",
             "server_label": mcp_server.name,
             "server_url": mcp_server.url,
-            "require_approval": "never"
+            "require_approval": "never",
         }
 
         # Add authentication if token provided (Response API format)
         if token:
-            tool_def["headers"] = {
-                "Authorization": f"Bearer {token}"
-            }
+            tool_def["headers"] = {"Authorization": f"Bearer {token}"}
 
         tools.append(tool_def)
     return tools

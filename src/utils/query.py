@@ -291,12 +291,12 @@ def validate_query_request(
     request: Request,
     query_request: QueryRequest,
     auth: Annotated[AuthTuple, Depends],
-) -> tuple[str, UserConversation | None]:
+) -> tuple[str, UserConversation | None, str]:
     """
     Validate query request and return user_id and user_conversation.
 
     Returns:
-        tuple: (user_id, user_conversation)
+        tuple: (user_id, user_conversation, token)
     """
     check_configuration_loaded(configuration)
 
@@ -337,7 +337,7 @@ def validate_query_request(
     else:
         logger.debug("Query does not contain conversation ID")
 
-    return user_id, user_conversation
+    return user_id, user_conversation, token
 
 
 def handle_api_connection_error(e: APIConnectionError) -> None:

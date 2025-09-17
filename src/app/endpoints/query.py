@@ -2,20 +2,19 @@
 
 import json
 import logging
-from typing import Annotated, Any, cast
+from typing import Annotated, cast
 
 from llama_stack_client import APIConnectionError
 from llama_stack_client import AsyncLlamaStackClient  # type: ignore
 from llama_stack_client.lib.agents.event_logger import interleaved_content_as_str
-from llama_stack_client.types import UserMessage, Shield  # type: ignore
+from llama_stack_client.types import UserMessage  # type: ignore
 from llama_stack_client.types.agents.turn import Turn
 from llama_stack_client.types.agents.turn_create_params import (
     ToolgroupAgentToolGroupWithArgs,
     Toolgroup,
 )
-from llama_stack_client.types.model_list_response import ModelListResponse
 
-from fastapi import APIRouter, HTTPException, Request, status, Depends
+from fastapi import APIRouter, Request, Depends
 
 from authentication import get_auth_dependency
 from authentication.interface import AuthTuple
@@ -25,7 +24,6 @@ import metrics
 from metrics.utils import update_llm_token_count_from_turn
 from authorization.middleware import authorize
 from models.config import Action
-from models.database.conversations import UserConversation
 from models.requests import QueryRequest
 from models.responses import QueryResponse
 from utils.endpoints import (
@@ -75,9 +73,9 @@ async def query_endpoint_handler(
         QueryResponse: Contains the conversation ID and the LLM-generated response.
     """
     # Validate request and get user info
-    user_id, user_conversation = validate_query_request(request, query_request, auth)
-    
-    _, _, _, token = auth
+    user_id, user_conversation, token = validate_query_request(
+        request, query_request, auth
+    )
 
     try:
         # try to get Llama Stack client
@@ -116,8 +114,6 @@ async def query_endpoint_handler(
     # connection to Llama Stack server
     except APIConnectionError as e:
         handle_api_connection_error(e)
-
-
 
 
 async def retrieve_response(  # pylint: disable=too-many-locals,too-many-branches,too-many-arguments
@@ -265,8 +261,6 @@ async def retrieve_response(  # pylint: disable=too-many-locals,too-many-branche
             conversation_id,
         )
     return summary, conversation_id
-
-
 
 
 def get_rag_toolgroups(
