@@ -8,16 +8,16 @@ from llama_stack_client import APIConnectionError, NotFoundError
 from fastapi import APIRouter, HTTPException, Request, status, Depends
 
 from client import AsyncLlamaStackClientHolder
-from configuration import configuration
-from app.database import get_session
 from authentication import get_auth_dependency
 from authorization.middleware import authorize
+from configuration import configuration
 from models.config import Action
 from models.responses import (
     ConversationResponse,
     ConversationDeleteResponse,
     ConversationsListResponse,
 )
+from utils.endpoints import check_configuration_loaded
 from utils.conversations import (
     conversation_responses,
     conversation_delete_responses,
@@ -68,12 +68,15 @@ async def get_conversation_endpoint_handler(
         ConversationResponse: Structured response containing the conversation
         ID and simplified chat history.
     """
+    # Ensure configuration is loaded
+    check_configuration_loaded(configuration)
+
     # Validate conversation ID format
     validate_conversation_id(conversation_id)
 
     user_id = auth[0]
 
-    user_conversation = validate_conversation_access(
+    validate_conversation_access(
         user_id=user_id,
         conversation_id=conversation_id,
         request=request,
@@ -146,13 +149,15 @@ async def get_conversation_endpoint_handler(
         ) from e
 
 
-async def get_agent_sessions(client, conversation_id: str):
+async def get_agent_sessions(client: Any, conversation_id: str) -> list[dict[str, Any]]:
     """Get agent sessions for a conversation."""
     agent_id = conversation_id
     return (await client.agents.session.list(agent_id=agent_id)).data
 
 
-async def delete_agent_sessions(client, conversation_id: str, sessions):
+async def delete_agent_sessions(
+    client: Any, conversation_id: str, sessions: list[dict[str, Any]]
+) -> None:
     """Delete agent sessions for a conversation."""
     agent_id = conversation_id
     session_id = str(sessions[0].get("session_id"))

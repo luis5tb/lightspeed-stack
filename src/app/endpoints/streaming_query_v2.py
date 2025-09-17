@@ -10,8 +10,8 @@ from llama_stack.apis.agents.openai_responses import (
 )
 
 from fastapi import APIRouter, Depends, Request, HTTPException
-from starlette import status
 from fastapi.responses import StreamingResponse
+from starlette import status
 
 from authentication import get_auth_dependency
 from authentication.interface import AuthTuple
@@ -22,7 +22,12 @@ import metrics
 from models.config import Action
 from models.database.conversations import UserConversation
 from models.requests import QueryRequest
-from utils.endpoints import check_configuration_loaded, get_system_prompt, validate_model_provider_override
+from utils.endpoints import (
+    check_configuration_loaded,
+    get_system_prompt,
+    validate_model_provider_override,
+    validate_conversation_ownership,
+)
 from utils.mcp_headers import mcp_headers_dependency
 from utils.query import (
     evaluate_model_hints,
@@ -87,8 +92,23 @@ async def streaming_query_endpoint_handler_v2(  # pylint: disable=too-many-local
 
     user_conversation: UserConversation | None = None
     if query_request.conversation_id:
-        # TODO: Implement conversation once Llama Stack supports its API
-        pass
+        user_conversation = validate_conversation_ownership(
+            user_id=user_id, conversation_id=query_request.conversation_id
+        )
+
+        if user_conversation is None:
+            logger.warning(
+                "User %s attempted to query conversation %s they don't own",
+                user_id,
+                query_request.conversation_id,
+            )
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail={
+                    "response": "Access denied",
+                    "cause": "You do not have permission to access this conversation",
+                },
+            )
 
     try:
         # try to get Llama Stack client
@@ -98,7 +118,7 @@ async def streaming_query_endpoint_handler_v2(  # pylint: disable=too-many-local
             *evaluate_model_hints(user_conversation=None, query_request=query_request),
         )
 
-        response, conversation_id = await retrieve_response(
+        response, _ = await retrieve_response(
             client,
             llama_stack_model_id,
             query_request,
@@ -122,10 +142,7 @@ async def streaming_query_endpoint_handler_v2(  # pylint: disable=too-many-local
             complete response for transcript storage if enabled.
             """
             chunk_id = 0
-            summary = TurnSummary(
-                llm_response="", tool_calls=[]
-            )
-            metadata_map: dict[str, dict[str, Any]] = {}
+            summary = TurnSummary(llm_response="", tool_calls=[])
 
             # Accumulators for Responses API
             text_parts: list[str] = []
@@ -201,7 +218,10 @@ async def streaming_query_endpoint_handler_v2(  # pylint: disable=too-many-local
                         name = getattr(item, "name", "function_call")
                         call_id = getattr(item, "call_id", item_id)
                         if item_id:
-                            tool_item_registry[item_id] = {"name": name, "call_id": call_id}
+                            tool_item_registry[item_id] = {
+                                "name": name,
+                                "call_id": call_id,
+                            }
 
                 # Stream tool call arguments as tool_call events
                 elif event_type == "response.function_call_arguments.delta":
@@ -279,7 +299,8 @@ async def streaming_query_endpoint_handler_v2(  # pylint: disable=too-many-local
                     attachments=query_request.attachments or [],
                 )
 
-        # Conversation persistence is handled inside the stream once the response.created event provides the ID
+        # Conversation persistence is handled inside the stream
+        # once the response.created event provides the ID
 
         # Update metrics for the LLM call
         metrics.llm_calls_total.labels(provider_id, model_id).inc()
@@ -342,7 +363,7 @@ async def retrieve_response(
         validate_attachments_metadata(query_request.attachments)
 
     # Prepare tools for responses API
-    tools = []
+    tools: list[dict[str, Any]] = []
     if not query_request.no_tools:
         # Get vector databases for RAG tools
         vector_db_ids = [
@@ -358,21 +379,24 @@ async def retrieve_response(
         mcp_tools = get_mcp_tools(configuration.mcp_servers, token)
         if mcp_tools:
             tools.extend(mcp_tools)
-            logger.debug("Configured %d MCP tools: %s",
-                       len(mcp_tools), [tool.get("server_label", "unknown") for tool in mcp_tools])
+            logger.debug(
+                "Configured %d MCP tools: %s",
+                len(mcp_tools),
+                [tool.get("server_label", "unknown") for tool in mcp_tools],
+            )
 
     response = await client.responses.create(
         input=query_request.query,
         model=model_id,
         instructions=system_prompt,
         previous_response_id=query_request.conversation_id,
-        tools=tools if tools else None,
+        tools=(cast(Any, tools) if tools else cast(Any, None)),
         stream=True,
         store=True,
     )
 
-    response = cast(AsyncIterator[OpenAIResponseObjectStream], response)
+    response_stream = cast(AsyncIterator[OpenAIResponseObjectStream], response)
 
     # For streaming responses, the ID arrives in the first 'response.created' chunk
     # Return empty conversation_id here; it will be set once the first chunk is received
-    return response, ""
+    return response_stream, ""
