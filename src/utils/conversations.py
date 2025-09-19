@@ -16,6 +16,7 @@ from models.responses import (
     ConversationDeleteResponse,
     ConversationsListResponse,
     ConversationDetails,
+    UnauthorizedResponse,
 )
 from utils.endpoints import (
     check_configuration_loaded,
