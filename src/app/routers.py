@@ -42,6 +42,7 @@ def include_routers(app: FastAPI) -> None:
     # V2 endpoints - Response API support
     app.include_router(query_v2.router, prefix="/v2")
     app.include_router(streaming_query_v2.router, prefix="/v2")
+    app.include_router(conversations.router, prefix="/v3")
 
     # road-core does not version these endpoints
     app.include_router(health.router)
