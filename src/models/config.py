@@ -348,6 +348,12 @@ class Action(str, Enum):
     INFO = "info"
     # Allow overriding model/provider via request
     MODEL_OVERRIDE = "model_override"
+    
+    # A2A (Agent-to-Agent) protocol actions
+    A2A_AGENT_CARD = "a2a_agent_card"
+    A2A_TASK_EXECUTION = "a2a_task_execution"
+    A2A_MESSAGE = "a2a_message"
+    A2A_JSONRPC = "a2a_jsonrpc"
 
 
 class AccessRule(ConfigurationBase):
