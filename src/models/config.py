@@ -151,6 +151,8 @@ class ServiceConfiguration(ConfigurationBase):
 
     host: str = "localhost"
     port: PositiveInt = 8080
+    # Externally reachable base URL for the service; if unset, code may fallback
+    base_url: Optional[str] = None
     auth_enabled: bool = False
     workers: PositiveInt = 1
     color_log: bool = True
@@ -373,6 +375,12 @@ class Action(str, Enum):
     INFO = "info"
     # Allow overriding model/provider via request
     MODEL_OVERRIDE = "model_override"
+
+    # A2A (Agent-to-Agent) protocol actions
+    A2A_AGENT_CARD = "a2a_agent_card"
+    A2A_TASK_EXECUTION = "a2a_task_execution"
+    A2A_MESSAGE = "a2a_message"
+    A2A_JSONRPC = "a2a_jsonrpc"
 
 
 class AccessRule(ConfigurationBase):
