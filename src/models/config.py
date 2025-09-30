@@ -7,6 +7,7 @@ from typing import Optional, Any, Pattern
 from enum import Enum
 from functools import cached_property
 import re
+import yaml
 
 import jsonpath_ng
 from jsonpath_ng.exceptions import JSONPathError
@@ -303,6 +304,12 @@ class ServiceConfiguration(ConfigurationBase):
         8080,
         title="Port",
         description="Service port",
+    )
+
+    base_url: Optional[str] = Field(
+        None,
+        title="Base URL",
+        description="Externally reachable base URL for the service; needed for A2A support.",
     )
 
     auth_enabled: bool = Field(
@@ -687,6 +694,12 @@ class Action(str, Enum):
     # Allow overriding model/provider via request
     MODEL_OVERRIDE = "model_override"
 
+    # A2A (Agent-to-Agent) protocol actions
+    A2A_AGENT_CARD = "a2a_agent_card"
+    A2A_TASK_EXECUTION = "a2a_task_execution"
+    A2A_MESSAGE = "a2a_message"
+    A2A_JSONRPC = "a2a_jsonrpc"
+
 
 class AccessRule(ConfigurationBase):
     """Rule defining what actions a role can perform."""
@@ -925,6 +938,8 @@ class Customization(ConfigurationBase):
     disable_query_system_prompt: bool = False
     system_prompt_path: Optional[FilePath] = None
     system_prompt: Optional[str] = None
+    agent_card_path: Optional[FilePath] = None
+    agent_card_config: Optional[dict[str, Any]] = None
     custom_profile: Optional[CustomProfile] = Field(default=None, init=False)
 
     @model_validator(mode="after")
@@ -937,6 +952,23 @@ class Customization(ConfigurationBase):
             self.system_prompt = checks.get_attribute_from_file(
                 dict(self), "system_prompt_path"
             )
+
+        # Load agent card configuration from YAML file
+        if self.agent_card_path is not None:
+            checks.file_check(self.agent_card_path, "agent card")
+
+            try:
+                with open(self.agent_card_path, "r", encoding="utf-8") as f:
+                    self.agent_card_config = yaml.safe_load(f)
+            except yaml.YAMLError as e:
+                raise ValueError(
+                    f"Invalid YAML in agent card file '{self.agent_card_path}': {e}"
+                ) from e
+            except OSError as e:
+                raise ValueError(
+                    f"Unable to read agent card file '{self.agent_card_path}': {e}"
+                ) from e
+
         return self
 
 
