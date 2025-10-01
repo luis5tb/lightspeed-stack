@@ -41,6 +41,8 @@ dependencies = [
     # Used by JWK token auth handler
     "aiohttp>=3.12.14",
     "authlib>=1.6.0",
+    # Used for A2A protocol support
+    "a2a-sdk",
     # OpenAPI exporter
     "email-validator>=2.2.0",
     "openai>=1.99.9",

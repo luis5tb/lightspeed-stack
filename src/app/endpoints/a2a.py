@@ -2,30 +2,26 @@
 
 import logging
 import uuid
-from typing import Annotated, Any, Dict
+from typing import Annotated, Any, Dict, Optional
+from datetime import datetime
 
 from fastapi import APIRouter, Request, Depends
+from pydantic import BaseModel, Field
 
 from authentication.interface import AuthTuple
 from authentication import get_auth_dependency
 from authorization.middleware import authorize
 from configuration import configuration
 from models.config import Action
-from models.a2a import (
-    A2AAgentCard,
-    A2ACapability,
-    A2AProvider,
-    A2AAuthentication,
-    A2ATaskRequest,
-    A2ATaskResponse,
-    A2AJsonRpcRequest,
-    A2AJsonRpcResponse,
-    A2AJsonRpcError,
-    A2AMessage,
-    A2AVersion,
-    AuthScheme,
-    ContentType,
-    TaskStatus,
+from a2a.types import (
+    AgentCard,
+    AgentSkill,
+    AgentProvider,
+    AgentCapabilities,
+    JSONRPCRequest,
+    JSONRPCResponse,
+    JSONRPCErrorResponse,
+    JSONRPCError,
 )
 from models.requests import QueryRequest
 from app.endpoints.query import query_endpoint_handler
@@ -36,6 +32,32 @@ logger = logging.getLogger("app.endpoints.a2a")
 router = APIRouter(tags=["a2a"])
 
 auth_dependency = get_auth_dependency()
+
+
+# Compatibility wrappers for simplified API endpoints
+class SimpleA2AMessage(BaseModel):
+    """Simplified message model for compatibility endpoints."""
+    content: str = Field(description="Message content")
+    content_type: str = Field(default="text/plain", description="Content type")
+    metadata: Dict[str, Any] = Field(default_factory=dict, description="Additional message metadata")
+
+
+class SimpleA2ATaskRequest(BaseModel):
+    """Simplified task request model for compatibility endpoints."""
+    task_id: Optional[str] = Field(None, description="Optional task identifier")
+    capability: str = Field(description="Capability/skill to invoke")
+    input: SimpleA2AMessage = Field(description="Input message")
+    parameters: Dict[str, Any] = Field(default_factory=dict, description="Additional parameters")
+    streaming: bool = Field(default=False, description="Whether to stream the response")
+
+
+class SimpleA2ATaskResponse(BaseModel):
+    """Simplified task response model for compatibility endpoints."""
+    task_id: str = Field(description="Task identifier")
+    status: str = Field(description="Task execution status")
+    output: Optional[SimpleA2AMessage] = Field(None, description="Output message if completed")
+    error: Optional[str] = Field(None, description="Error message if failed")
+    metadata: Dict[str, Any] = Field(default_factory=dict, description="Additional response metadata")
 
 
 def _enhance_query_for_capability(capability: str, original_query: str, parameters: Dict[str, Any]) -> str:
@@ -99,98 +121,101 @@ def _enhance_query_for_capability(capability: str, original_query: str, paramete
     return base_context
 
 
-def get_lightspeed_agent_card() -> A2AAgentCard:
+def get_lightspeed_agent_card() -> AgentCard:
     """Generate the A2A Agent Card for Lightspeed.
     
     Returns:
-        A2AAgentCard: The agent card describing Lightspeed's capabilities.
+        AgentCard: The agent card describing Lightspeed's capabilities.
     """
     # Get base URL from configuration or construct it
     service_config = configuration.service_configuration
     base_url = getattr(service_config, 'base_url', 'http://localhost:8080')
     
-    # Define Lightspeed's capabilities for OpenShift cluster installation
-    capabilities = [
-        A2ACapability(
-            name="cluster_installation_guidance",
+    # Define Lightspeed's skills for OpenShift cluster installation
+    skills = [
+        AgentSkill(
+            id="cluster_installation_guidance",
+            name="Cluster Installation Guidance",
             description="Provide guidance and assistance for OpenShift cluster installation using assisted-installer",
-            input_types=[ContentType.TEXT, ContentType.JSON],
-            output_types=[ContentType.TEXT, ContentType.JSON],
-            streaming=True,
-            async_execution=False
+            tags=["openshift", "installation", "assisted-installer"],
+            inputModes=["text/plain", "application/json"],
+            outputModes=["text/plain", "application/json"],
+            examples=[
+                "How do I install OpenShift using assisted-installer?",
+                "What are the prerequisites for OpenShift installation?"
+            ]
         ),
-        A2ACapability(
-            name="cluster_configuration_validation",
+        AgentSkill(
+            id="cluster_configuration_validation",
+            name="Cluster Configuration Validation",
             description="Validate and provide recommendations for OpenShift cluster configuration parameters",
-            input_types=[ContentType.JSON, ContentType.TEXT],
-            output_types=[ContentType.JSON, ContentType.TEXT],
-            streaming=False,
-            async_execution=False
+            tags=["openshift", "configuration", "validation"],
+            inputModes=["application/json", "text/plain"],
+            outputModes=["application/json", "text/plain"],
+            examples=[
+                "Validate my cluster configuration",
+                "Check if my OpenShift setup meets requirements"
+            ]
         ),
-        A2ACapability(
-            name="installation_troubleshooting",
+        AgentSkill(
+            id="installation_troubleshooting",
+            name="Installation Troubleshooting",
             description="Help troubleshoot OpenShift cluster installation issues and provide solutions",
-            input_types=[ContentType.TEXT, ContentType.JSON],
-            output_types=[ContentType.TEXT, ContentType.JSON],
-            streaming=True,
-            async_execution=False
+            tags=["openshift", "troubleshooting", "support"],
+            inputModes=["text/plain", "application/json"],
+            outputModes=["text/plain", "application/json"],
+            examples=[
+                "My cluster installation is failing",
+                "How do I fix installation errors?"
+            ]
         ),
-        A2ACapability(
-            name="cluster_requirements_analysis",
+        AgentSkill(
+            id="cluster_requirements_analysis",
+            name="Cluster Requirements Analysis",
             description="Analyze infrastructure requirements for OpenShift cluster deployment",
-            input_types=[ContentType.JSON, ContentType.TEXT],
-            output_types=[ContentType.JSON, ContentType.TEXT],
-            streaming=False,
-            async_execution=False
+            tags=["openshift", "requirements", "planning"],
+            inputModes=["application/json", "text/plain"],
+            outputModes=["application/json", "text/plain"],
+            examples=[
+                "What hardware do I need for OpenShift?",
+                "Analyze requirements for a 5-node cluster"
+            ]
         )
     ]
     
     # Provider information
-    provider = A2AProvider(
-        name="Red Hat",
-        url="https://redhat.com",
-        contact="lightspeed-support@redhat.com"
+    provider = AgentProvider(
+        organization="Red Hat",
+        url="https://redhat.com"
     )
     
-    # Authentication configuration
-    authentication = A2AAuthentication(
-        scheme=AuthScheme.BEARER,
-        required=True,
-        description="Bearer token authentication required for API access"
+    # Agent capabilities
+    capabilities = AgentCapabilities(
+        streaming=True,
+        pushNotifications=False,
+        stateTransitionHistory=False
     )
     
-    return A2AAgentCard(
+    return AgentCard(
         name="OpenShift Assisted Installer AI Assistant",
         description="AI-powered assistant specialized in OpenShift cluster installation, configuration, and troubleshooting using assisted-installer backend",
         version=__version__,
-        a2a_version=A2AVersion.V0_3_0,
-        service_url=f"{base_url}/a2a",
-        documentation_url=f"{base_url}/docs",
+        url=f"{base_url}/a2a",
+        documentationUrl=f"{base_url}/docs",
         provider=provider,
+        skills=skills,
+        defaultInputModes=["text/plain"],
+        defaultOutputModes=["text/plain"],
         capabilities=capabilities,
-        default_input_type=ContentType.TEXT,
-        default_output_type=ContentType.TEXT,
-        supports_streaming=True,
-        supports_push_notifications=False,
-        authentication=authentication,
-        tags=["openshift", "assisted-installer", "cluster-installation", "ai-assistant", "infrastructure"],
-        metadata={
-            "service_name": configuration.configuration.name,
-            "specialization": "OpenShift cluster installation and management",
-            "backend_integration": "assisted-installer",
-            "supported_platforms": ["bare-metal", "vsphere", "aws", "azure", "gcp"],
-            "installation_methods": ["assisted-installer", "agent-based-installer"],
-            "rag_enabled": True,
-            "conversation_support": True
-        }
+        protocolVersion="0.2.1",
     )
 
 
-@router.get("/.well-known/agent.json", response_model=A2AAgentCard)
+@router.get("/.well-known/agent.json", response_model=AgentCard)
 @authorize(Action.A2A_AGENT_CARD)
 async def get_agent_card(
     auth: Annotated[AuthTuple, Depends(auth_dependency)],
-) -> A2AAgentCard:
+) -> AgentCard:
     """
     Serve the A2A Agent Card at the well-known location.
     
@@ -198,7 +223,7 @@ async def get_agent_card(
     capabilities according to the A2A protocol specification.
     
     Returns:
-        A2AAgentCard: The agent card describing this agent's capabilities.
+        AgentCard: The agent card describing this agent's capabilities.
     """
     try:
         logger.info("Serving A2A Agent Card")
@@ -208,14 +233,14 @@ async def get_agent_card(
         raise
 
 
-@router.post("/a2a/task", response_model=A2ATaskResponse)
+@router.post("/a2a/task", response_model=SimpleA2ATaskResponse)
 @authorize(Action.A2A_TASK_EXECUTION)
 async def execute_a2a_task(
     request: Request,
-    task_request: A2ATaskRequest,
+    task_request: SimpleA2ATaskRequest,
     auth: Annotated[AuthTuple, Depends(auth_dependency)],
     mcp_headers: dict[str, dict[str, str]] = Depends(mcp_headers_dependency),
-) -> A2ATaskResponse:
+) -> SimpleA2ATaskResponse:
     """
     Execute an A2A task request.
     
@@ -229,7 +254,7 @@ async def execute_a2a_task(
         mcp_headers: MCP headers for the request.
         
     Returns:
-        A2ATaskResponse: The task execution response.
+        SimpleA2ATaskResponse: The task execution response.
     """
     logger.info("Executing A2A task: %s", task_request.capability)
     
@@ -270,9 +295,9 @@ async def execute_a2a_task(
             )
             
             # Convert response back to A2A format with capability-specific metadata
-            output_message = A2AMessage(
+            output_message = SimpleA2AMessage(
                 content=query_response.response,
-                content_type=ContentType.TEXT,
+                content_type="text/plain",
                 metadata={
                     "conversation_id": query_response.conversation_id,
                     "rag_chunks_count": len(query_response.rag_chunks),
@@ -283,9 +308,9 @@ async def execute_a2a_task(
                 }
             )
             
-            return A2ATaskResponse(
+            return SimpleA2ATaskResponse(
                 task_id=task_id,
-                status=TaskStatus.COMPLETED,
+                status="completed",
                 output=output_message,
                 metadata={
                     "execution_time": "completed",
@@ -296,31 +321,31 @@ async def execute_a2a_task(
             
         else:
             # Unsupported capability
-            return A2ATaskResponse(
+            return SimpleA2ATaskResponse(
                 task_id=task_id,
-                status=TaskStatus.FAILED,
+                status="failed",
                 error=f"Unsupported capability: {task_request.capability}",
                 metadata={"capability": task_request.capability}
             )
             
     except Exception as e:  # pylint: disable=broad-except
         logger.error("Error executing A2A task %s: %s", task_id, str(e))
-        return A2ATaskResponse(
+        return SimpleA2ATaskResponse(
             task_id=task_id,
-            status=TaskStatus.FAILED,
+            status="failed",
             error=f"Task execution failed: {str(e)}",
             metadata={"capability": task_request.capability}
         )
 
 
-@router.post("/a2a/message", response_model=A2AMessage)
+@router.post("/a2a/message", response_model=SimpleA2AMessage)
 @authorize(Action.A2A_MESSAGE)
 async def handle_a2a_message(
     request: Request,
-    message: A2AMessage,
+    message: SimpleA2AMessage,
     auth: Annotated[AuthTuple, Depends(auth_dependency)],
     mcp_headers: dict[str, dict[str, str]] = Depends(mcp_headers_dependency),
-) -> A2AMessage:
+) -> SimpleA2AMessage:
     """
     Handle simple A2A message interactions.
     
@@ -335,7 +360,7 @@ async def handle_a2a_message(
         mcp_headers: MCP headers for the request.
         
     Returns:
-        A2AMessage: The response message.
+        SimpleA2AMessage: The response message.
     """
     logger.info("Processing A2A message: %s", message.content_type)
     
@@ -380,9 +405,9 @@ async def handle_a2a_message(
         )
         
         # Return simple A2A message response
-        return A2AMessage(
+        return SimpleA2AMessage(
             content=query_response.response,
-            content_type=ContentType.TEXT,
+            content_type="text/plain",
             metadata={
                 "conversation_id": query_response.conversation_id,
                 "rag_chunks_count": len(query_response.rag_chunks),
@@ -397,9 +422,9 @@ async def handle_a2a_message(
         logger.error("Error processing A2A message: %s", str(e))
         
         # Return error as A2A message
-        return A2AMessage(
+        return SimpleA2AMessage(
             content=f"Sorry, I encountered an error processing your message: {str(e)}",
-            content_type=ContentType.TEXT,
+            content_type="text/plain",
             metadata={
                 "error": True,
                 "error_type": "processing_error",
@@ -408,14 +433,14 @@ async def handle_a2a_message(
         )
 
 
-@router.post("/a2a/jsonrpc", response_model=A2AJsonRpcResponse)
+@router.post("/a2a/jsonrpc", response_model=JSONRPCResponse)
 @authorize(Action.A2A_JSONRPC)
 async def handle_a2a_jsonrpc(
     request: Request,
-    jsonrpc_request: A2AJsonRpcRequest,
+    jsonrpc_request: JSONRPCRequest,
     auth: Annotated[AuthTuple, Depends(auth_dependency)],
     mcp_headers: dict[str, dict[str, str]] = Depends(mcp_headers_dependency),
-) -> A2AJsonRpcResponse:
+) -> JSONRPCResponse:
     """
     Handle A2A JSON-RPC 2.0 requests.
     
@@ -430,14 +455,14 @@ async def handle_a2a_jsonrpc(
         mcp_headers: MCP headers for the request.
         
     Returns:
-        A2AJsonRpcResponse: The JSON-RPC response.
+        JSONRPCResponse: The JSON-RPC response.
     """
     logger.info("Handling A2A JSON-RPC method: %s", jsonrpc_request.method)
     
     try:
         if jsonrpc_request.method == "execute_task":
             # Extract task request from JSON-RPC params
-            task_request = A2ATaskRequest(**jsonrpc_request.params)
+            task_request = SimpleA2ATaskRequest(**jsonrpc_request.params)
             
             # Execute the task
             task_response = await execute_a2a_task(
@@ -447,7 +472,7 @@ async def handle_a2a_jsonrpc(
                 mcp_headers=mcp_headers
             )
             
-            return A2AJsonRpcResponse(
+            return JSONRPCResponse(
                 id=jsonrpc_request.id,
                 result=task_response.model_dump()
             )
@@ -456,10 +481,10 @@ async def handle_a2a_jsonrpc(
             # Return agent capabilities
             agent_card = get_lightspeed_agent_card()
             
-            return A2AJsonRpcResponse(
+            return JSONRPCResponse(
                 id=jsonrpc_request.id,
                 result={
-                    "capabilities": [cap.model_dump() for cap in agent_card.capabilities],
+                    "skills": [skill.model_dump() for skill in agent_card.skills],
                     "agent_info": {
                         "name": agent_card.name,
                         "version": agent_card.version,
@@ -470,7 +495,7 @@ async def handle_a2a_jsonrpc(
             
         elif jsonrpc_request.method == "send_message":
             # Handle simple message via JSON-RPC
-            message = A2AMessage(**jsonrpc_request.params)
+            message = SimpleA2AMessage(**jsonrpc_request.params)
             
             # Process the message using the message handler
             response_message = await handle_a2a_message(
@@ -480,36 +505,36 @@ async def handle_a2a_jsonrpc(
                 mcp_headers=mcp_headers
             )
             
-            return A2AJsonRpcResponse(
+            return JSONRPCResponse(
                 id=jsonrpc_request.id,
                 result=response_message.model_dump()
             )
             
         else:
-            # Unsupported method
-            error = A2AJsonRpcError(
+            # Unsupported method - return error response
+            error = JSONRPCError(
                 code=-32601,
                 message="Method not found",
                 data={"method": jsonrpc_request.method}
             )
             
-            return A2AJsonRpcResponse(
+            return JSONRPCErrorResponse(
                 id=jsonrpc_request.id,
-                error=error.model_dump()
+                error=error
             )
             
     except Exception as e:  # pylint: disable=broad-except
         logger.error("Error handling JSON-RPC request: %s", str(e))
         
-        error = A2AJsonRpcError(
+        error = JSONRPCError(
             code=-32603,
             message="Internal error",
             data={"error": str(e)}
         )
         
-        return A2AJsonRpcResponse(
+        return JSONRPCErrorResponse(
             id=jsonrpc_request.id,
-            error=error.model_dump()
+            error=error
         )
 
 
@@ -525,6 +550,6 @@ async def a2a_health_check() -> Dict[str, Any]:
         "status": "healthy",
         "service": "lightspeed-a2a",
         "version": __version__,
-        "a2a_version": A2AVersion.V0_3_0.value,
-        "timestamp": "2024-01-01T00:00:00Z"  # This would be actual timestamp in production
+        "a2a_sdk_version": "0.2.1",
+        "timestamp": datetime.now().isoformat()
     }
