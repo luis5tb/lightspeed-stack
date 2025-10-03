@@ -5,7 +5,7 @@ import uuid
 from typing import Annotated, Any, Dict, Optional
 from datetime import datetime
 
-from fastapi import APIRouter, Request, Depends
+from fastapi import APIRouter, Request, Depends, HTTPException, status
 from pydantic import BaseModel, Field
 
 from authentication.interface import AuthTuple
@@ -295,17 +295,49 @@ async def execute_a2a_task(
             )
             
             # Convert response back to A2A format with capability-specific metadata
+            # Be robust in case the handler returns a dict instead of a Pydantic model
+            qr = (
+                query_response.model_dump()  # pyright: ignore[reportAttributeAccessIssue]
+                if hasattr(query_response, "model_dump")
+                else (query_response if isinstance(query_response, dict) else {})
+            )
+            content = (
+                getattr(query_response, "response", None)
+                if not isinstance(qr, dict)
+                else qr.get("response")
+            )
+            conversation_id = (
+                getattr(query_response, "conversation_id", None)
+                if not isinstance(qr, dict)
+                else qr.get("conversation_id")
+            )
+            rag_chunks = (
+                getattr(query_response, "rag_chunks", [])
+                if not isinstance(qr, dict)
+                else qr.get("rag_chunks", [])
+            )
+            referenced_documents = (
+                getattr(query_response, "referenced_documents", [])
+                if not isinstance(qr, dict)
+                else qr.get("referenced_documents", [])
+            )
+            tool_calls = (
+                getattr(query_response, "tool_calls", None)
+                if not isinstance(qr, dict)
+                else qr.get("tool_calls")
+            )
+
             output_message = SimpleA2AMessage(
-                content=query_response.response,
+                content=content or "",
                 content_type="text/plain",
                 metadata={
-                    "conversation_id": query_response.conversation_id,
-                    "rag_chunks_count": len(query_response.rag_chunks),
-                    "referenced_documents_count": len(query_response.referenced_documents),
-                    "tool_calls_count": len(query_response.tool_calls) if query_response.tool_calls else 0,
+                    "conversation_id": conversation_id,
+                    "rag_chunks_count": len(rag_chunks or []),
+                    "referenced_documents_count": len(referenced_documents or []),
+                    "tool_calls_count": len(tool_calls or []),
                     "capability_type": task_request.capability,
-                    "openshift_context": True
-                }
+                    "openshift_context": True,
+                },
             )
             
             return SimpleA2ATaskResponse(
@@ -405,32 +437,61 @@ async def handle_a2a_message(
         )
         
         # Return simple A2A message response
+        # Be robust in case the handler returns a dict instead of a Pydantic model
+        qr = (
+            query_response.model_dump()  # pyright: ignore[reportAttributeAccessIssue]
+            if hasattr(query_response, "model_dump")
+            else (query_response if isinstance(query_response, dict) else {})
+        )
+        content = (
+            getattr(query_response, "response", None)
+            if not isinstance(qr, dict)
+            else qr.get("response")
+        )
+        conversation_id = (
+            getattr(query_response, "conversation_id", None)
+            if not isinstance(qr, dict)
+            else qr.get("conversation_id")
+        )
+        rag_chunks = (
+            getattr(query_response, "rag_chunks", [])
+            if not isinstance(qr, dict)
+            else qr.get("rag_chunks", [])
+        )
+        referenced_documents = (
+            getattr(query_response, "referenced_documents", [])
+            if not isinstance(qr, dict)
+            else qr.get("referenced_documents", [])
+        )
+        tool_calls = (
+            getattr(query_response, "tool_calls", None)
+            if not isinstance(qr, dict)
+            else qr.get("tool_calls")
+        )
+
         return SimpleA2AMessage(
-            content=query_response.response,
+            content=content or "",
             content_type="text/plain",
             metadata={
-                "conversation_id": query_response.conversation_id,
-                "rag_chunks_count": len(query_response.rag_chunks),
-                "referenced_documents_count": len(query_response.referenced_documents),
-                "tool_calls_count": len(query_response.tool_calls) if query_response.tool_calls else 0,
+                "conversation_id": conversation_id,
+                "rag_chunks_count": len(rag_chunks or []),
+                "referenced_documents_count": len(referenced_documents or []),
+                "tool_calls_count": len(tool_calls or []),
                 "interaction_type": "simple_message",
-                "openshift_context": True
-            }
+                "openshift_context": True,
+            },
         )
         
     except Exception as e:  # pylint: disable=broad-except
         logger.error("Error processing A2A message: %s", str(e))
-        
-        # Return error as A2A message
-        return SimpleA2AMessage(
-            content=f"Sorry, I encountered an error processing your message: {str(e)}",
-            content_type="text/plain",
-            metadata={
-                "error": True,
-                "error_type": "processing_error",
-                "interaction_type": "simple_message"
-            }
-        )
+        # Return proper HTTP error instead of 200 with error payload
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail={
+                "response": "Error processing A2A message",
+                "cause": str(e),
+            },
+        ) from e
 
 
 @router.post("/a2a/jsonrpc", response_model=JSONRPCResponse)
