@@ -414,7 +414,7 @@ async def handle_a2a_message(
     Returns:
         Message: The official A2A SDK response message.
     """
-    logger.info("Processing A2A message with ID: %s", message.messageId)
+    logger.info("Processing A2A message with ID: %s", message.message_id)
 
     try:
         # Extract text content from message parts
