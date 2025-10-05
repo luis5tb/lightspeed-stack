@@ -499,8 +499,8 @@ async def handle_a2a_message(
         return Message(
             messageId=str(uuid.uuid4()),
             role=Role.agent,
-            contextId=message.contextId or conversation_id or str(uuid.uuid4()),
-            taskId=message.taskId,
+            contextId=message.context_id or conversation_id or str(uuid.uuid4()),
+            taskId=message.task_id,
             parts=[TextPart(text=content or "", kind="text")],
             metadata={
                 "conversation_id": conversation_id,
