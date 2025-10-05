@@ -2,11 +2,10 @@
 
 import logging
 import uuid
-from typing import Annotated, Any, Dict, Optional
+from typing import Annotated, Any, Dict
 from datetime import datetime
 
 from fastapi import APIRouter, Request, Depends, HTTPException, status
-from pydantic import BaseModel, Field
 
 from authentication.interface import AuthTuple
 from authentication import get_auth_dependency
@@ -22,6 +21,12 @@ from a2a.types import (
     JSONRPCResponse,
     JSONRPCErrorResponse,
     JSONRPCError,
+    Message,
+    TextPart,
+    Role,
+    Task,
+    TaskState,
+    TaskStatus,
 )
 from models.requests import QueryRequest
 from app.endpoints.query import query_endpoint_handler
@@ -34,40 +39,14 @@ router = APIRouter(tags=["a2a"])
 auth_dependency = get_auth_dependency()
 
 
-# Compatibility wrappers for simplified API endpoints
-class SimpleA2AMessage(BaseModel):
-    """Simplified message model for compatibility endpoints."""
-    content: str = Field(description="Message content")
-    content_type: str = Field(default="text/plain", description="Content type")
-    metadata: Dict[str, Any] = Field(default_factory=dict, description="Additional message metadata")
-
-
-class SimpleA2ATaskRequest(BaseModel):
-    """Simplified task request model for compatibility endpoints."""
-    task_id: Optional[str] = Field(None, description="Optional task identifier")
-    capability: str = Field(description="Capability/skill to invoke")
-    input: SimpleA2AMessage = Field(description="Input message")
-    parameters: Dict[str, Any] = Field(default_factory=dict, description="Additional parameters")
-    streaming: bool = Field(default=False, description="Whether to stream the response")
-
-
-class SimpleA2ATaskResponse(BaseModel):
-    """Simplified task response model for compatibility endpoints."""
-    task_id: str = Field(description="Task identifier")
-    status: str = Field(description="Task execution status")
-    output: Optional[SimpleA2AMessage] = Field(None, description="Output message if completed")
-    error: Optional[str] = Field(None, description="Error message if failed")
-    metadata: Dict[str, Any] = Field(default_factory=dict, description="Additional response metadata")
-
-
 def _enhance_query_for_capability(capability: str, original_query: str, parameters: Dict[str, Any]) -> str:
     """Enhance the user query with capability-specific context for OpenShift installation.
-    
+
     Args:
         capability: The A2A capability being invoked.
         original_query: The original user query.
         parameters: Additional parameters from the A2A request.
-        
+
     Returns:
         Enhanced query string with capability-specific context.
     """
@@ -100,37 +79,37 @@ def _enhance_query_for_capability(capability: str, original_query: str, paramete
             f"Requirements analysis for: {original_query}"
         )
     }
-    
+
     base_context = capability_contexts.get(capability, original_query)
-    
+
     # Add platform-specific context if provided
     platform = parameters.get("platform")
     if platform:
         base_context += f"\n\nTarget platform: {platform}"
-    
+
     # Add cluster size context if provided
     cluster_size = parameters.get("cluster_size")
     if cluster_size:
         base_context += f"\nCluster size: {cluster_size}"
-    
+
     # Add version context if provided
     openshift_version = parameters.get("openshift_version")
     if openshift_version:
         base_context += f"\nOpenShift version: {openshift_version}"
-    
+
     return base_context
 
 
 def get_lightspeed_agent_card() -> AgentCard:
     """Generate the A2A Agent Card for Lightspeed.
-    
+
     Returns:
         AgentCard: The agent card describing Lightspeed's capabilities.
     """
     # Get base URL from configuration or construct it
     service_config = configuration.service_configuration
     base_url = getattr(service_config, 'base_url', 'http://localhost:8080')
-    
+
     # Define Lightspeed's skills for OpenShift cluster installation
     skills = [
         AgentSkill(
@@ -182,20 +161,20 @@ def get_lightspeed_agent_card() -> AgentCard:
             ]
         )
     ]
-    
+
     # Provider information
     provider = AgentProvider(
         organization="Red Hat",
         url="https://redhat.com"
     )
-    
+
     # Agent capabilities
     capabilities = AgentCapabilities(
         streaming=True,
         pushNotifications=False,
         stateTransitionHistory=False
     )
-    
+
     return AgentCard(
         name="OpenShift Assisted Installer AI Assistant",
         description="AI-powered assistant specialized in OpenShift cluster installation, configuration, and troubleshooting using assisted-installer backend",
@@ -218,10 +197,10 @@ async def get_agent_card(
 ) -> AgentCard:
     """
     Serve the A2A Agent Card at the well-known location.
-    
+
     This endpoint provides the agent card that describes Lightspeed's
     capabilities according to the A2A protocol specification.
-    
+
     Returns:
         AgentCard: The agent card describing this agent's capabilities.
     """
@@ -233,59 +212,63 @@ async def get_agent_card(
         raise
 
 
-@router.post("/a2a/task", response_model=SimpleA2ATaskResponse)
+@router.post("/a2a/task", response_model=Task)
 @authorize(Action.A2A_TASK_EXECUTION)
 async def execute_a2a_task(
     request: Request,
-    task_request: SimpleA2ATaskRequest,
+    task_request: Dict[str, Any],
     auth: Annotated[AuthTuple, Depends(auth_dependency)],
     mcp_headers: dict[str, dict[str, str]] = Depends(mcp_headers_dependency),
-) -> SimpleA2ATaskResponse:
+) -> Task:
     """
-    Execute an A2A task request.
-    
+    Execute an A2A task request (custom endpoint, not JSON-RPC).
+
     This endpoint handles A2A task execution, mapping A2A requests
     to Lightspeed's internal query processing capabilities.
-    
+
     Args:
         request: The FastAPI request object.
-        task_request: The A2A task request.
+        task_request: Dictionary with skill, input message, and parameters.
         auth: Authentication tuple.
         mcp_headers: MCP headers for the request.
-        
+
     Returns:
-        SimpleA2ATaskResponse: The task execution response.
+        Task: The official A2A SDK Task object.
     """
-    logger.info("Executing A2A task: %s", task_request.capability)
-    
-    # Generate task ID if not provided
-    task_id = task_request.task_id or str(uuid.uuid4())
-    
+    # Extract request parameters
+    skill_id = task_request.get("skill", task_request.get("capability", ""))
+    input_content = task_request.get("input", {}).get("content", "")
+    parameters = task_request.get("parameters", {})
+    task_id = task_request.get("task_id", str(uuid.uuid4()))
+    context_id = parameters.get("conversation_id", str(uuid.uuid4()))
+
+    logger.info("Executing A2A task for skill: %s", skill_id)
+
     try:
-        # Map A2A capability to internal processing for OpenShift installation tasks
-        supported_capabilities = [
+        # Map A2A skill to internal processing for OpenShift installation tasks
+        supported_skills = [
             "cluster_installation_guidance",
-            "cluster_configuration_validation", 
+            "cluster_configuration_validation",
             "installation_troubleshooting",
             "cluster_requirements_analysis"
         ]
-        
-        if task_request.capability in supported_capabilities:
-            # Enhance the query with capability-specific context
+
+        if skill_id in supported_skills:
+            # Enhance the query with skill-specific context
             enhanced_query = _enhance_query_for_capability(
-                task_request.capability, 
-                task_request.input.content,
-                task_request.parameters
+                skill_id,
+                input_content,
+                parameters
             )
-            
+
             # Convert A2A request to internal QueryRequest
             query_request = QueryRequest(
                 query=enhanced_query,
-                conversation_id=task_request.parameters.get("conversation_id"),
-                model=task_request.parameters.get("model"),
-                provider=task_request.parameters.get("provider")
+                conversation_id=parameters.get("conversation_id"),
+                model=parameters.get("model"),
+                provider=parameters.get("provider")
             )
-            
+
             # Execute the query using existing Agents API handler
             query_response = await query_endpoint_handler(
                 request=request,
@@ -293,7 +276,7 @@ async def execute_a2a_task(
                 auth=auth,
                 mcp_headers=mcp_headers
             )
-            
+
             # Convert response back to A2A format with capability-specific metadata
             # Be robust in case the handler returns a dict instead of a Pydantic model
             qr = (
@@ -327,99 +310,142 @@ async def execute_a2a_task(
                 else qr.get("tool_calls")
             )
 
-            output_message = SimpleA2AMessage(
-                content=content or "",
-                content_type="text/plain",
+            # Create official SDK Message object for the response
+            response_message = Message(
+                messageId=str(uuid.uuid4()),
+                role=Role.agent,
+                contextId=conversation_id or context_id,
+                taskId=task_id,
+                parts=[TextPart(text=content or "", kind="text")],
                 metadata={
-                    "conversation_id": conversation_id,
                     "rag_chunks_count": len(rag_chunks or []),
                     "referenced_documents_count": len(referenced_documents or []),
-                    "tool_calls_count": len(tool_calls or []),
-                    "capability_type": task_request.capability,
+                    "tool_calls_count": len(tool_calls or []) if tool_calls else 0,
+                    "skill_type": skill_id,
                     "openshift_context": True,
                 },
             )
-            
-            return SimpleA2ATaskResponse(
-                task_id=task_id,
-                status="completed",
-                output=output_message,
+
+            # Create official SDK Task object
+            return Task(
+                id=task_id,
+                contextId=conversation_id or context_id,
+                kind="task",
+                status=TaskStatus(
+                    state=TaskState.completed,
+                    timestamp=datetime.now().isoformat()
+                ),
+                history=[response_message],
                 metadata={
-                    "execution_time": "completed",
-                    "capability": task_request.capability,
+                    "skill": skill_id,
                     "specialization": "openshift_installation"
                 }
             )
-            
+
         else:
-            # Unsupported capability
-            return SimpleA2ATaskResponse(
-                task_id=task_id,
-                status="failed",
-                error=f"Unsupported capability: {task_request.capability}",
-                metadata={"capability": task_request.capability}
+            # Unsupported skill - return failed task
+            error_message = Message(
+                messageId=str(uuid.uuid4()),
+                role=Role.agent,
+                contextId=context_id,
+                taskId=task_id,
+                parts=[TextPart(text=f"Unsupported skill: {skill_id}", kind="text")],
+                metadata={"error": True}
             )
-            
+
+            return Task(
+                id=task_id,
+                contextId=context_id,
+                kind="task",
+                status=TaskStatus(
+                    state=TaskState.failed,
+                    message=error_message,
+                    timestamp=datetime.now().isoformat()
+                ),
+                metadata={"skill": skill_id}
+            )
+
     except Exception as e:  # pylint: disable=broad-except
         logger.error("Error executing A2A task %s: %s", task_id, str(e))
-        return SimpleA2ATaskResponse(
-            task_id=task_id,
-            status="failed",
-            error=f"Task execution failed: {str(e)}",
-            metadata={"capability": task_request.capability}
+
+        error_message = Message(
+            messageId=str(uuid.uuid4()),
+            role=Role.agent,
+            contextId=context_id,
+            taskId=task_id,
+            parts=[TextPart(text=f"Task execution failed: {str(e)}", kind="text")],
+            metadata={"error": True}
+        )
+
+        return Task(
+            id=task_id,
+            contextId=context_id,
+            kind="task",
+            status=TaskStatus(
+                state=TaskState.failed,
+                message=error_message,
+                timestamp=datetime.now().isoformat()
+            ),
+            metadata={"skill": skill_id if 'skill_id' in locals() else "unknown"}
         )
 
 
-@router.post("/a2a/message", response_model=SimpleA2AMessage)
+@router.post("/a2a/message", response_model=Message)
 @authorize(Action.A2A_MESSAGE)
 async def handle_a2a_message(
     request: Request,
-    message: SimpleA2AMessage,
+    message: Message,
     auth: Annotated[AuthTuple, Depends(auth_dependency)],
     mcp_headers: dict[str, dict[str, str]] = Depends(mcp_headers_dependency),
-) -> SimpleA2AMessage:
+) -> Message:
     """
     Handle simple A2A message interactions.
-    
+
     This endpoint provides a lightweight alternative to the full task execution
     endpoint for simple, direct message exchanges that don't require task
     management overhead.
-    
+
     Args:
         request: The FastAPI request object.
         message: The A2A message to process.
         auth: Authentication tuple.
         mcp_headers: MCP headers for the request.
-        
+
     Returns:
-        SimpleA2AMessage: The response message.
+        Message: The official A2A SDK response message.
     """
-    logger.info("Processing A2A message: %s", message.content_type)
-    
+    logger.info("Processing A2A message with ID: %s", message.messageId)
+
     try:
-        # For simple messages, we'll use a default capability based on content
+        # Extract text content from message parts
+        message_text = " ".join(
+            part.text for part in message.parts
+            if isinstance(part, TextPart) or (isinstance(part, dict) and part.get("kind") == "text")
+        )
+
+        # For simple messages, we'll use a default skill based on content
         # This provides a more conversational, less structured interaction
         enhanced_query = (
             "You are an OpenShift cluster installation expert using the assisted-installer. "
             "Provide helpful, concise responses about OpenShift installation, configuration, "
             "troubleshooting, or requirements analysis. Keep responses focused and practical. "
-            f"User message: {message.content}"
+            f"User message: {message_text}"
         )
-        
+
         # Add any metadata context
         if message.metadata:
             platform = message.metadata.get("platform")
             if platform:
                 enhanced_query += f"\nTarget platform: {platform}"
-            
+
             cluster_size = message.metadata.get("cluster_size")
             if cluster_size:
                 enhanced_query += f"\nCluster size: {cluster_size}"
-            
+
             openshift_version = message.metadata.get("openshift_version")
             if openshift_version:
                 enhanced_query += f"\nOpenShift version: {openshift_version}"
-        
+
         # Convert to internal QueryRequest
         query_request = QueryRequest(
             query=enhanced_query,
@@ -427,7 +453,7 @@ async def handle_a2a_message(
             model=message.metadata.get("model") if message.metadata else None,
             provider=message.metadata.get("provider") if message.metadata else None
         )
-        
+
         # Execute the query using existing Agents API handler
         query_response = await query_endpoint_handler(
             request=request,
@@ -435,7 +461,7 @@ async def handle_a2a_message(
             auth=auth,
             mcp_headers=mcp_headers
         )
-        
+
         # Return simple A2A message response
         # Be robust in case the handler returns a dict instead of a Pydantic model
         qr = (
@@ -469,19 +495,23 @@ async def handle_a2a_message(
             else qr.get("tool_calls")
         )
 
-        return SimpleA2AMessage(
-            content=content or "",
-            content_type="text/plain",
+        # Return official SDK Message response
+        return Message(
+            messageId=str(uuid.uuid4()),
+            role=Role.agent,
+            contextId=message.contextId or conversation_id or str(uuid.uuid4()),
+            taskId=message.taskId,
+            parts=[TextPart(text=content or "", kind="text")],
             metadata={
                 "conversation_id": conversation_id,
                 "rag_chunks_count": len(rag_chunks or []),
                 "referenced_documents_count": len(referenced_documents or []),
-                "tool_calls_count": len(tool_calls or []),
+                "tool_calls_count": len(tool_calls or []) if tool_calls else 0,
                 "interaction_type": "simple_message",
-                "openshift_context": True,
-            },
+                "openshift_context": True
+            }
         )
-        
+
     except Exception as e:  # pylint: disable=broad-except
         logger.error("Error processing A2A message: %s", str(e))
         # Return proper HTTP error instead of 200 with error payload
@@ -504,44 +534,41 @@ async def handle_a2a_jsonrpc(
 ) -> JSONRPCResponse:
     """
     Handle A2A JSON-RPC 2.0 requests.
-    
+
     This endpoint provides JSON-RPC 2.0 compatibility for A2A communication,
     allowing other agents to interact with Lightspeed using the standard
     JSON-RPC protocol.
-    
+
     Args:
         request: The FastAPI request object.
         jsonrpc_request: The JSON-RPC request.
         auth: Authentication tuple.
         mcp_headers: MCP headers for the request.
-        
+
     Returns:
         JSONRPCResponse: The JSON-RPC response.
     """
     logger.info("Handling A2A JSON-RPC method: %s", jsonrpc_request.method)
-    
+
     try:
-        if jsonrpc_request.method == "execute_task":
-            # Extract task request from JSON-RPC params
-            task_request = SimpleA2ATaskRequest(**jsonrpc_request.params)
-            
-            # Execute the task
+        if jsonrpc_request.method == "execute_task" or jsonrpc_request.method == "tasks/create":
+            # Execute the task - pass params as dict
             task_response = await execute_a2a_task(
                 request=request,
-                task_request=task_request,
+                task_request=jsonrpc_request.params or {},
                 auth=auth,
                 mcp_headers=mcp_headers
             )
-            
+
             return JSONRPCResponse(
                 id=jsonrpc_request.id,
                 result=task_response.model_dump()
             )
-            
-        elif jsonrpc_request.method == "get_capabilities":
-            # Return agent capabilities
+
+        elif jsonrpc_request.method == "get_capabilities" or jsonrpc_request.method == "agent/capabilities":
+            # Return agent capabilities/skills
             agent_card = get_lightspeed_agent_card()
-            
+
             return JSONRPCResponse(
                 id=jsonrpc_request.id,
                 result={
@@ -553,11 +580,11 @@ async def handle_a2a_jsonrpc(
                     }
                 }
             )
-            
-        elif jsonrpc_request.method == "send_message":
-            # Handle simple message via JSON-RPC
-            message = SimpleA2AMessage(**jsonrpc_request.params)
-            
+
+        elif jsonrpc_request.method == "send_message" or jsonrpc_request.method == "message/send":
+            # Handle message via JSON-RPC - convert params to Message object
+            message = Message(**jsonrpc_request.params)
+
             # Process the message using the message handler
             response_message = await handle_a2a_message(
                 request=request,
@@ -565,12 +592,12 @@ async def handle_a2a_jsonrpc(
                 auth=auth,
                 mcp_headers=mcp_headers
             )
-            
+
             return JSONRPCResponse(
                 id=jsonrpc_request.id,
                 result=response_message.model_dump()
             )
-            
+
         else:
             # Unsupported method - return error response
             error = JSONRPCError(
@@ -578,21 +605,21 @@ async def handle_a2a_jsonrpc(
                 message="Method not found",
                 data={"method": jsonrpc_request.method}
             )
-            
+
             return JSONRPCErrorResponse(
                 id=jsonrpc_request.id,
                 error=error
             )
-            
+
     except Exception as e:  # pylint: disable=broad-except
         logger.error("Error handling JSON-RPC request: %s", str(e))
-        
+
         error = JSONRPCError(
             code=-32603,
             message="Internal error",
             data={"error": str(e)}
         )
-        
+
         return JSONRPCErrorResponse(
             id=jsonrpc_request.id,
             error=error
@@ -603,7 +630,7 @@ async def handle_a2a_jsonrpc(
 async def a2a_health_check() -> Dict[str, Any]:
     """
     Health check endpoint for A2A service.
-    
+
     Returns:
         Dict[str, Any]: Health status information.
     """
