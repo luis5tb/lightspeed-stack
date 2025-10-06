@@ -1,11 +1,13 @@
 """Handler for A2A (Agent-to-Agent) protocol endpoints."""
 
 import logging
+import json
 import uuid
 from typing import Annotated, Any, Dict
 from datetime import datetime
 
 from fastapi import APIRouter, Request, Depends, HTTPException, status
+from fastapi.responses import StreamingResponse
 
 from authentication.interface import AuthTuple
 from authentication import get_auth_dependency
@@ -29,7 +31,18 @@ from a2a.types import (
     TaskStatus,
 )
 from models.requests import QueryRequest
-from app.endpoints.query import query_endpoint_handler
+from app.endpoints.query import (
+    query_endpoint_handler,
+    select_model_and_provider_id,
+    evaluate_model_hints,
+)
+from client import AsyncLlamaStackClientHolder
+from app.endpoints.streaming_query import (
+    retrieve_response as streaming_retrieve_response,
+    stream_start_event,
+    stream_end_event,
+    stream_build_event,
+)
 from utils.mcp_headers import mcp_headers_dependency
 from version import __version__
 
@@ -38,6 +51,95 @@ router = APIRouter(tags=["a2a"])
 
 auth_dependency = get_auth_dependency()
 
+
+# -----------------------------
+# Helpers to reduce duplication
+# -----------------------------
+def _extract_text_from_message_parts(message: Message) -> str:
+    """Extract plain text from a Message.parts, supporting dict and model parts."""
+    text_chunks: list[str] = []
+    for part in getattr(message, "parts", []) or []:
+        if isinstance(part, dict):
+            if part.get("kind") == "text" and "text" in part:
+                text_chunks.append(part.get("text", ""))
+        else:
+            if getattr(part, "kind", None) == "text":
+                txt = getattr(part, "text", "")
+                if txt:
+                    text_chunks.append(txt)
+    return " ".join(text_chunks)
+
+
+def _build_enhanced_query_from_message(message: Message) -> tuple[str, dict]:
+    """Pass-through query (no augmentation) and original metadata.
+
+    We rely on the system prompt for domain guidance; only forward the user's
+    message text and metadata needed for routing (conversation_id/model/provider).
+    """
+    message_text = _extract_text_from_message_parts(message)
+    md = message.metadata or {}
+    return message_text, md
+
+
+def _make_query_request_from_enhanced_query(enhanced_query: str, md: dict) -> QueryRequest:
+    return QueryRequest(
+        query=enhanced_query,
+        conversation_id=md.get("conversation_id") if md else None,
+        model=md.get("model") if md else None,
+        provider=md.get("provider") if md else None,
+    )
+
+
+async def _start_llama_stream(query_request: QueryRequest, token: str, mcp_headers: dict[str, dict[str, str]] | None) -> tuple[Any, str]:
+    """Start llama streaming for a given QueryRequest, returning (stream, conversation_id)."""
+    client = AsyncLlamaStackClientHolder().get_client()
+    llama_stack_model_id, _model_id, _provider_id = select_model_and_provider_id(
+        await client.models.list(),
+        *evaluate_model_hints(user_conversation=None, query_request=query_request),
+    )
+    return await streaming_retrieve_response(
+        client,
+        llama_stack_model_id,
+        query_request,
+        token,
+        mcp_headers=mcp_headers,
+    )
+
+
+async def _aggregate_stream_text(stream: Any) -> str:
+    """Aggregate streamed SSE events into a plain text string of tokens."""
+    text_chunks: list[str] = []
+    metadata_map: dict[str, dict[str, Any]] = {}
+    chunk_id = 0
+    async for chunk in stream:
+        for evt in stream_build_event(chunk, chunk_id, metadata_map):
+            chunk_id += 1
+            if not evt.startswith("data: "):
+                continue
+            try:
+                payload = json.loads(evt[len("data: "):].strip())
+                event = payload.get("event")
+                if event in ("token", "turn_complete"):
+                    token = payload.get("data", {}).get("token", "")
+                    if isinstance(token, str):
+                        text_chunks.append(token)
+            except Exception:
+                # ignore malformed events
+                pass
+    return "".join(text_chunks)
+
+
+def _streaming_sse_response(stream: Any, conversation_id: str) -> StreamingResponse:
+    async def response_generator() -> Any:
+        yield stream_start_event(conversation_id)
+        chunk_id = 0
+        async for chunk in stream:
+            for evt in stream_build_event(chunk, chunk_id, {}):
+                chunk_id += 1
+                yield evt
+        yield stream_end_event({})
+
+    return StreamingResponse(response_generator(), media_type="text/event-stream")
 
 def _enhance_query_for_capability(capability: str, original_query: str, parameters: Dict[str, Any]) -> str:
     """Enhance the user query with capability-specific context for OpenShift installation.
@@ -269,46 +371,12 @@ async def execute_a2a_task(
                 provider=parameters.get("provider")
             )
 
-            # Execute the query using existing Agents API handler
-            query_response = await query_endpoint_handler(
-                request=request,
-                query_request=query_request,
-                auth=auth,
-                mcp_headers=mcp_headers
-            )
-
-            # Convert response back to A2A format with capability-specific metadata
-            # Be robust in case the handler returns a dict instead of a Pydantic model
-            qr = (
-                query_response.model_dump()  # pyright: ignore[reportAttributeAccessIssue]
-                if hasattr(query_response, "model_dump")
-                else (query_response if isinstance(query_response, dict) else {})
-            )
-            content = (
-                getattr(query_response, "response", None)
-                if not isinstance(qr, dict)
-                else qr.get("response")
-            )
-            conversation_id = (
-                getattr(query_response, "conversation_id", None)
-                if not isinstance(qr, dict)
-                else qr.get("conversation_id")
-            )
-            rag_chunks = (
-                getattr(query_response, "rag_chunks", [])
-                if not isinstance(qr, dict)
-                else qr.get("rag_chunks", [])
-            )
-            referenced_documents = (
-                getattr(query_response, "referenced_documents", [])
-                if not isinstance(qr, dict)
-                else qr.get("referenced_documents", [])
-            )
-            tool_calls = (
-                getattr(query_response, "tool_calls", None)
-                if not isinstance(qr, dict)
-                else qr.get("tool_calls")
-            )
+            # Stream tokens using shared helpers; aggregate for Task history message
+            stream, conversation_id = await _start_llama_stream(query_request, auth[3], mcp_headers)
+            content = await _aggregate_stream_text(stream)
+            rag_chunks: list[Any] = []
+            referenced_documents: list[Any] = []
+            tool_calls: list[Any] | None = None
 
             # Create official SDK Message object for the response
             response_message = Message(
@@ -417,83 +485,14 @@ async def handle_a2a_message(
     logger.info("Processing A2A message with ID: %s", message.message_id)
 
     try:
-        # Extract text content from message parts
-        message_text = " ".join(
-            part.text for part in message.parts
-            if isinstance(part, TextPart) or (isinstance(part, dict) and part.get("kind") == "text")
-        )
-
-        # For simple messages, we'll use a default skill based on content
-        # This provides a more conversational, less structured interaction
-        enhanced_query = (
-            "You are an OpenShift cluster installation expert using the assisted-installer. "
-            "Provide helpful, concise responses about OpenShift installation, configuration, "
-            "troubleshooting, or requirements analysis. Keep responses focused and practical. "
-            f"User message: {message_text}"
-        )
-
-        # Add any metadata context
-        if message.metadata:
-            platform = message.metadata.get("platform")
-            if platform:
-                enhanced_query += f"\nTarget platform: {platform}"
-
-            cluster_size = message.metadata.get("cluster_size")
-            if cluster_size:
-                enhanced_query += f"\nCluster size: {cluster_size}"
-
-            openshift_version = message.metadata.get("openshift_version")
-            if openshift_version:
-                enhanced_query += f"\nOpenShift version: {openshift_version}"
-
-        # Convert to internal QueryRequest
-        query_request = QueryRequest(
-            query=enhanced_query,
-            conversation_id=message.metadata.get("conversation_id") if message.metadata else None,
-            model=message.metadata.get("model") if message.metadata else None,
-            provider=message.metadata.get("provider") if message.metadata else None
-        )
-
-        # Execute the query using existing Agents API handler
-        query_response = await query_endpoint_handler(
-            request=request,
-            query_request=query_request,
-            auth=auth,
-            mcp_headers=mcp_headers
-        )
-
-        # Return simple A2A message response
-        # Be robust in case the handler returns a dict instead of a Pydantic model
-        qr = (
-            query_response.model_dump()  # pyright: ignore[reportAttributeAccessIssue]
-            if hasattr(query_response, "model_dump")
-            else (query_response if isinstance(query_response, dict) else {})
-        )
-        content = (
-            getattr(query_response, "response", None)
-            if not isinstance(qr, dict)
-            else qr.get("response")
-        )
-        conversation_id = (
-            getattr(query_response, "conversation_id", None)
-            if not isinstance(qr, dict)
-            else qr.get("conversation_id")
-        )
-        rag_chunks = (
-            getattr(query_response, "rag_chunks", [])
-            if not isinstance(qr, dict)
-            else qr.get("rag_chunks", [])
-        )
-        referenced_documents = (
-            getattr(query_response, "referenced_documents", [])
-            if not isinstance(qr, dict)
-            else qr.get("referenced_documents", [])
-        )
-        tool_calls = (
-            getattr(query_response, "tool_calls", None)
-            if not isinstance(qr, dict)
-            else qr.get("tool_calls")
-        )
+        # Use shared helpers: build query, stream, aggregate
+        enhanced_query, md = _build_enhanced_query_from_message(message)
+        query_request = _make_query_request_from_enhanced_query(enhanced_query, md)
+        stream, conversation_id = await _start_llama_stream(query_request, auth[3], mcp_headers)
+        content = await _aggregate_stream_text(stream)
+        rag_chunks: list[Any] = []
+        referenced_documents: list[Any] = []
+        tool_calls: list[Any] | None = None
 
         # Return official SDK Message response
         return Message(
@@ -522,6 +521,54 @@ async def handle_a2a_message(
                 "cause": str(e),
             },
         ) from e
+
+
+@router.post("/a2a/message/stream")
+@authorize(Action.A2A_MESSAGE)
+async def stream_a2a_message(
+    request: Request,
+    message: Message,
+    auth: Annotated[AuthTuple, Depends(auth_dependency)],
+    mcp_headers: dict[str, dict[str, str]] = Depends(mcp_headers_dependency),
+) -> StreamingResponse:
+    """
+    Stream A2A message responses via SSE.
+
+    Produces token/tool_call/turn_complete events for the given message input.
+    """
+    enhanced_query, md = _build_enhanced_query_from_message(message)
+    query_request = _make_query_request_from_enhanced_query(enhanced_query, md)
+    stream, conversation_id = await _start_llama_stream(query_request, auth[3], mcp_headers)
+    return _streaming_sse_response(stream, conversation_id)
+
+
+@router.post("/a2a/task/stream")
+@authorize(Action.A2A_TASK_EXECUTION)
+async def stream_a2a_task(
+    request: Request,
+    task_request: Dict[str, Any],
+    auth: Annotated[AuthTuple, Depends(auth_dependency)],
+    mcp_headers: dict[str, dict[str, str]] = Depends(mcp_headers_dependency),
+) -> StreamingResponse:
+    """
+    Stream A2A task execution via SSE.
+
+    Accepts the same payload as /a2a/task (skill, input.content, parameters),
+    but streams incremental generation chunks and tool events.
+    """
+    skill_id = task_request.get("skill", task_request.get("capability", ""))
+    input_content = task_request.get("input", {}).get("content", "")
+    parameters = task_request.get("parameters", {})
+
+    enhanced_query = _enhance_query_for_capability(skill_id, input_content, parameters)
+    query_request = QueryRequest(
+        query=enhanced_query,
+        conversation_id=parameters.get("conversation_id"),
+        model=parameters.get("model"),
+        provider=parameters.get("provider"),
+    )
+    stream, conversation_id = await _start_llama_stream(query_request, auth[3], mcp_headers)
+    return _streaming_sse_response(stream, conversation_id)
 
 
 @router.post("/a2a/jsonrpc", response_model=JSONRPCResponse)
