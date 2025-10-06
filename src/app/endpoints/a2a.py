@@ -292,7 +292,7 @@ def get_lightspeed_agent_card() -> AgentCard:
     )
 
 
-@router.get("/.well-known/agent.json", response_model=AgentCard)
+@router.get("/.well-known/agent-card.json", response_model=AgentCard)
 @authorize(Action.A2A_AGENT_CARD)
 async def get_agent_card(
     auth: Annotated[AuthTuple, Depends(auth_dependency)],
@@ -357,18 +357,23 @@ async def execute_a2a_task(
 
         if skill_id in supported_skills:
             # Enhance the query with skill-specific context
-            enhanced_query = _enhance_query_for_capability(
-                skill_id,
-                input_content,
-                parameters
-            )
+            enhanced_query = input_content or ""
 
-            # Convert A2A request to internal QueryRequest
+            # Convert A2A request to internal QueryRequest and log
             query_request = QueryRequest(
                 query=enhanced_query,
                 conversation_id=parameters.get("conversation_id"),
                 model=parameters.get("model"),
                 provider=parameters.get("provider")
+            )
+            preview = enhanced_query[:200] + ("..." if len(enhanced_query) > 200 else "")
+            logger.info(
+                "A2A task query: '%s' | skill=%s conversation_id=%s model=%s provider=%s",
+                preview,
+                skill_id,
+                parameters.get("conversation_id"),
+                parameters.get("model"),
+                parameters.get("provider"),
             )
 
             # Stream tokens using shared helpers; aggregate for Task history message
@@ -487,6 +492,15 @@ async def handle_a2a_message(
     try:
         # Use shared helpers: build query, stream, aggregate
         enhanced_query, md = _build_enhanced_query_from_message(message)
+        # Log A2A message query preview and routing metadata
+        preview = enhanced_query[:200] + ("..." if len(enhanced_query) > 200 else "")
+        logger.info(
+            "A2A message query: '%s' | conversation_id=%s model=%s provider=%s",
+            preview,
+            md.get("conversation_id") if md else None,
+            md.get("model") if md else None,
+            md.get("provider") if md else None,
+        )
         query_request = _make_query_request_from_enhanced_query(enhanced_query, md)
         stream, conversation_id = await _start_llama_stream(query_request, auth[3], mcp_headers)
         content = await _aggregate_stream_text(stream)
