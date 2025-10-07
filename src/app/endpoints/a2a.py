@@ -292,6 +292,8 @@ def get_lightspeed_agent_card() -> AgentCard:
     )
 
 
+@router.get("/.well-known/agent.json", response_model=AgentCard)
+# deprecated endpoint
 @router.get("/.well-known/agent-card.json", response_model=AgentCard)
 @authorize(Action.A2A_AGENT_CARD)
 async def get_agent_card(
