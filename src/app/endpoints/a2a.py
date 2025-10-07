@@ -130,6 +130,7 @@ async def _aggregate_stream_text(stream: Any) -> str:
 
 
 def _streaming_sse_response(stream: Any, conversation_id: str) -> StreamingResponse:
+    """Create SSE response for direct SSE clients (non-JSON-RPC)."""
     async def response_generator() -> Any:
         yield stream_start_event(conversation_id)
         chunk_id = 0
@@ -140,6 +141,139 @@ def _streaming_sse_response(stream: Any, conversation_id: str) -> StreamingRespo
         yield stream_end_event({})
 
     return StreamingResponse(response_generator(), media_type="text/event-stream")
+
+
+def _streaming_jsonrpc_sse_response(
+    stream: Any,
+    conversation_id: str,
+    request_id: str | int | None,
+    result_type: str = "message"
+) -> StreamingResponse:
+    """
+    Create SSE response with JSON-RPC wrapped data.
+
+    Each SSE data payload is a JSON-RPC response:
+    data: {"jsonrpc": "2.0", "id": <id>, "result": <partial_result>}
+    """
+    async def jsonrpc_sse_generator() -> Any:
+        accumulated_text: list[str] = []
+        chunk_id = 0
+        metadata_map: dict[str, dict[str, Any]] = {}
+        message_id = str(uuid.uuid4())
+        task_id = str(uuid.uuid4()) if result_type == "task" else None
+
+        async for chunk in stream:
+            for evt in stream_build_event(chunk, chunk_id, metadata_map):
+                chunk_id += 1
+                if not evt.startswith("data: "):
+                    continue
+
+                try:
+                    payload = json.loads(evt[len("data: "):].strip())
+                    event_type = payload.get("event")
+
+                    # For token events, accumulate and emit JSON-RPC wrapped result
+                    if event_type == "token":
+                        token = payload.get("data", {}).get("token", "")
+                        if isinstance(token, str) and token:
+                            accumulated_text.append(token)
+
+                            # Build partial result
+                            if result_type == "message":
+                                partial_result = {
+                                    "messageId": message_id,
+                                    "role": "agent",
+                                    "contextId": conversation_id,
+                                    "parts": [{"kind": "text", "text": "".join(accumulated_text)}],
+                                    "metadata": {"streaming": True, "chunk_id": chunk_id}
+                                }
+                            else:  # task
+                                partial_result = {
+                                    "id": task_id,
+                                    "contextId": conversation_id,
+                                    "kind": "task",
+                                    "status": {
+                                        "state": "running",
+                                        "timestamp": datetime.now().isoformat()
+                                    },
+                                    "history": [{
+                                        "messageId": message_id,
+                                        "role": "agent",
+                                        "contextId": conversation_id,
+                                        "parts": [{"kind": "text", "text": "".join(accumulated_text)}],
+                                        "metadata": {"streaming": True}
+                                    }],
+                                    "metadata": {"streaming": True}
+                                }
+
+                            # Wrap in JSON-RPC response and emit as SSE
+                            jsonrpc_response = {
+                                "jsonrpc": "2.0",
+                                "id": request_id,
+                                "result": partial_result
+                            }
+                            yield f"data: {json.dumps(jsonrpc_response)}\n\n"
+
+                    # For turn_complete, emit final JSON-RPC result
+                    elif event_type == "turn_complete":
+                        token = payload.get("data", {}).get("token", "")
+                        if isinstance(token, str) and token:
+                            accumulated_text.append(token)
+
+                        final_text = "".join(accumulated_text)
+
+                        if result_type == "message":
+                            final_result = {
+                                "messageId": message_id,
+                                "role": "agent",
+                                "contextId": conversation_id,
+                                "parts": [{"kind": "text", "text": final_text}],
+                                "metadata": {"streaming": False, "completed": True}
+                            }
+                        else:  # task
+                            final_result = {
+                                "id": task_id,
+                                "contextId": conversation_id,
+                                "kind": "task",
+                                "status": {
+                                    "state": "completed",
+                                    "timestamp": datetime.now().isoformat()
+                                },
+                                "history": [{
+                                    "messageId": message_id,
+                                    "role": "agent",
+                                    "contextId": conversation_id,
+                                    "parts": [{"kind": "text", "text": final_text}],
+                                    "metadata": {"completed": True}
+                                }],
+                                "metadata": {"completed": True}
+                            }
+
+                        # Emit final JSON-RPC response
+                        jsonrpc_response = {
+                            "jsonrpc": "2.0",
+                            "id": request_id,
+                            "result": final_result
+                        }
+                        yield f"data: {json.dumps(jsonrpc_response)}\n\n"
+
+                except Exception as e:
+                    logger.error("Error processing stream chunk for JSON-RPC SSE: %s", str(e))
+                    # Emit JSON-RPC error
+                    error_response = {
+                        "jsonrpc": "2.0",
+                        "id": request_id,
+                        "error": {
+                            "code": -32603,
+                            "message": "Internal error during streaming",
+                            "data": {"error": str(e)}
+                        }
+                    }
+                    yield f"data: {json.dumps(error_response)}\n\n"
+                    return
+
+    return StreamingResponse(jsonrpc_sse_generator(), media_type="text/event-stream")
+
 
 def _enhance_query_for_capability(capability: str, original_query: str, parameters: Dict[str, Any]) -> str:
     """Enhance the user query with capability-specific context for OpenShift installation.
@@ -585,6 +719,84 @@ async def stream_a2a_task(
     )
     stream, conversation_id = await _start_llama_stream(query_request, auth[3], mcp_headers)
     return _streaming_sse_response(stream, conversation_id)
+
+
+@router.post("/a2a")
+@authorize(Action.A2A_JSONRPC)
+async def handle_a2a_jsonrpc_root(
+    request: Request,
+    jsonrpc_request: JSONRPCRequest,
+    auth: Annotated[AuthTuple, Depends(auth_dependency)],
+    mcp_headers: dict[str, dict[str, str]] = Depends(mcp_headers_dependency),
+):
+    """
+    JSON-RPC endpoint mounted at the agent base URL, per A2A expectations.
+
+    Supports both non-streaming and streaming methods:
+    - Non-streaming methods ("message/send", "tasks/create", etc.): Returns a single JSON-RPC response
+    - Streaming methods ("message/stream", "tasks/stream"): Returns Server-Sent Events (SSE) with
+      Content-Type: text/event-stream, where each SSE data payload is a JSON-RPC response object.
+    """
+    # Delegate to the existing handler for non-streaming methods
+    method = jsonrpc_request.method
+    if method in ("execute_task", "tasks/create", "get_capabilities", "agent/capabilities", "send_message", "message/send"):
+        return await handle_a2a_jsonrpc(request, jsonrpc_request, auth, mcp_headers)
+
+    # Handle streaming message via JSON-RPC wrapped SSE when method is "message/stream"
+    if method in ("message/stream", "message.stream"):
+        # Extract Message from params; inspector sends under params.message
+        params = jsonrpc_request.params or {}
+        msg_payload = params.get("message", params)
+        # Build the SDK Message instance
+        message = Message(**msg_payload)
+        # Build query and start stream
+        enhanced_query, md = _build_enhanced_query_from_message(message)
+        # Log the query
+        preview = enhanced_query[:200] + ("..." if len(enhanced_query) > 200 else "")
+        logger.info(
+            "A2A jsonrpc message/stream query: '%s' | conversation_id=%s model=%s provider=%s",
+            preview,
+            md.get("conversation_id"),
+            md.get("model"),
+            md.get("provider"),
+        )
+        query_request = _make_query_request_from_enhanced_query(enhanced_query, md)
+        stream, conversation_id = await _start_llama_stream(query_request, auth[3], mcp_headers)
+        # Return JSON-RPC wrapped SSE streaming response
+        return _streaming_jsonrpc_sse_response(stream, conversation_id, jsonrpc_request.id, result_type="message")
+
+    # Handle streaming task via JSON-RPC wrapped SSE when method is "tasks/stream"
+    if method in ("tasks/stream", "tasks.stream"):
+        params = jsonrpc_request.params or {}
+        # Allow nested shape (params.task) or flat params
+        task_payload = params.get("task", params)
+        skill_id = task_payload.get("skill", task_payload.get("capability", ""))
+        input_content = (task_payload.get("input", {}) or {}).get("content", "")
+        parameters = task_payload.get("parameters", {}) or {}
+
+        # Build QueryRequest from input content and route metadata
+        enhanced_query = input_content or ""
+        query_request = QueryRequest(
+            query=enhanced_query,
+            conversation_id=parameters.get("conversation_id"),
+            model=parameters.get("model"),
+            provider=parameters.get("provider"),
+        )
+        logger.info(
+            "A2A jsonrpc tasks/stream query: '%s' | skill=%s conversation_id=%s model=%s provider=%s",
+            (enhanced_query[:200] + ("..." if len(enhanced_query) > 200 else "")),
+            skill_id,
+            parameters.get("conversation_id"),
+            parameters.get("model"),
+            parameters.get("provider"),
+        )
+        stream, conversation_id = await _start_llama_stream(query_request, auth[3], mcp_headers)
+        # Return JSON-RPC wrapped SSE streaming response
+        return _streaming_jsonrpc_sse_response(stream, conversation_id, jsonrpc_request.id, result_type="task")
+
+    # Fallback: method not supported
+    error = JSONRPCError(code=-32601, message="Method not found", data={"method": method})
+    return JSONRPCErrorResponse(id=jsonrpc_request.id, error=error)
 
 
 @router.post("/a2a/jsonrpc", response_model=JSONRPCResponse)
