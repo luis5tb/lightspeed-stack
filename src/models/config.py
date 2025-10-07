@@ -149,6 +149,8 @@ class ServiceConfiguration(ConfigurationBase):
 
     host: str = "localhost"
     port: PositiveInt = 8080
+    # Externally reachable base URL for the service; if unset, code may fallback
+    base_url: Optional[str] = None
     auth_enabled: bool = False
     workers: PositiveInt = 1
     color_log: bool = True
