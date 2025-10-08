@@ -172,6 +172,8 @@ class LightspeedAgentExecutor(AgentExecutor):
 
             # Process stream and send incremental updates
             text_chunks = []
+            is_complete = False
+
             async for chunk in stream:
                 # Extract text from chunk - llama-stack structure
                 if hasattr(chunk, 'event') and chunk.event is not None:
@@ -186,14 +188,19 @@ class LightspeedAgentExecutor(AgentExecutor):
                         )
                         if final_text:
                             text_chunks.append(final_text)
-                            await task_updater.update_status(
-                                TaskState.working,
-                                message=new_agent_text_message(
-                                    "".join(text_chunks),
-                                    context_id=context_id,
-                                    task_id=task_id
-                                )
+
+                        # Mark that we've received the complete turn
+                        is_complete = True
+
+                        # Send final message and mark task as complete
+                        await task_updater.complete(
+                            message=new_agent_text_message(
+                                "".join(text_chunks),
+                                context_id=context_id,
+                                task_id=task_id
                             )
+                        )
+                        logger.info("Task %s completed successfully", task_id)
 
                     # Handle streaming inference tokens
                     elif event_type == "step_progress":
@@ -211,9 +218,16 @@ class LightspeedAgentExecutor(AgentExecutor):
                                     )
                                 )
 
-            # Mark task as complete
-            # Note: The final message is already sent via the last update_status call
-            # await task_updater.complete()
+            # Fallback: If we exited the loop without completing, mark as complete anyway
+            if not is_complete:
+                logger.warning("Stream ended without turn_complete event, marking task as complete")
+                await task_updater.complete(
+                    message=new_agent_text_message(
+                        "".join(text_chunks) if text_chunks else "Task completed",
+                        context_id=context_id,
+                        task_id=task_id
+                    )
+                )
 
         except Exception as exc:  # pylint: disable=broad-except
             logger.error("Error executing agent: %s", str(exc), exc_info=True)
