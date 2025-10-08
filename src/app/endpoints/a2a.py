@@ -335,6 +335,19 @@ def get_lightspeed_agent_card() -> AgentCard:
         defaultOutputModes=["text/plain"],
         capabilities=capabilities,
         protocolVersion="0.2.1",
+        security=[
+            {
+                "bearer": []
+            }
+        ],
+        security_schemes={
+            "bearer": {
+                "type": "http",
+                "scheme": "bearer",
+                "bearer_format": "JWT",
+                "description": "Bearer token for authentication with OpenShift services"
+            }
+        }
     )
 
 
