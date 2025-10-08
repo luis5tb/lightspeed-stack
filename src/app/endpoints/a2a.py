@@ -11,14 +11,16 @@ from a2a.types import (
     AgentSkill,
     AgentProvider,
     AgentCapabilities,
+    Task,
+    TaskState,
 )
-from a2a.server.agent_execution import AgentExecutor
-from a2a.server.event_queue import EventQueue
-from a2a.server.request_context import RequestContext
-from a2a.server.request_handler import DefaultRequestHandler
-from a2a.server.task_store import InMemoryTaskStore
+from a2a.server.agent_execution import AgentExecutor, RequestContext
+from a2a.server.events import EventQueue
+from a2a.server.request_handlers import DefaultRequestHandler
+from a2a.server.tasks import InMemoryTaskStore
+from a2a.server.tasks.task_updater import TaskUpdater
 from a2a.server.apps import A2AStarletteApplication
-from a2a.server.utils import new_agent_text_message
+from a2a.utils import new_agent_text_message, new_task
 
 from authentication.interface import AuthTuple
 from authentication import get_auth_dependency
@@ -75,12 +77,63 @@ class LightspeedAgentExecutor(AgentExecutor):
             context: The request context containing user input and metadata
             event_queue: Queue for sending response events
         """
+        # Get or create task
+        task = await self._prepare_task(context, event_queue)
+
+        # Process the task with streaming
+        await self._process_task_streaming(context, event_queue, task.context_id, task.id)
+
+    async def _prepare_task(
+        self,
+        context: RequestContext,
+        event_queue: EventQueue
+    ) -> Task:
+        """
+        Get existing task or create a new one.
+
+        Args:
+            context: The request context
+            event_queue: Queue for sending events
+
+        Returns:
+            Task object
+        """
+        task = context.current_task
+        if not task:
+            if not context.message:
+                raise Exception("No message provided in context")
+            task = new_task(context.message)
+            await event_queue.enqueue_event(task)
+        return task
+
+    async def _process_task_streaming(
+        self,
+        context: RequestContext,
+        event_queue: EventQueue,
+        context_id: str,
+        task_id: str
+    ) -> None:
+        """
+        Process the task with streaming updates.
+
+        Args:
+            context: The request context
+            event_queue: Queue for sending events
+            context_id: Context ID for the task
+            task_id: Task ID
+        """
+        task_updater = TaskUpdater(event_queue, task_id, context_id)
+
         try:
             # Extract user input using SDK utility
             user_input = context.get_user_input()
             if not user_input:
-                await event_queue.enqueue_event(
-                    new_agent_text_message("I didn't receive any input. How can I help you with OpenShift installation?")
+                await task_updater.failed(
+                    message=new_agent_text_message(
+                        "I didn't receive any input. How can I help you with OpenShift installation?",
+                        context_id=context_id,
+                        task_id=task_id
+                    )
                 )
                 return
 
@@ -108,7 +161,7 @@ class LightspeedAgentExecutor(AgentExecutor):
                 *evaluate_model_hints(user_conversation=None, query_request=query_request),
             )
 
-            # Stream response from LLM
+            # Stream response from LLM with status updates
             stream, conversation_id = await retrieve_response(
                 client,
                 llama_stack_model_id,
@@ -117,27 +170,59 @@ class LightspeedAgentExecutor(AgentExecutor):
                 mcp_headers=self.mcp_headers,
             )
 
-            # Aggregate streamed tokens into final response
+            # Process stream and send incremental updates
             text_chunks = []
             async for chunk in stream:
-                # Extract text from chunk
-                if hasattr(chunk, 'event'):
-                    if chunk.event.event_type in ('turn_complete',):
-                        if hasattr(chunk.event, 'event_payload') and hasattr(chunk.event.event_payload, 'delta'):
-                            text_chunks.append(chunk.event.event_payload.delta)
-                    elif hasattr(chunk.event, 'event_payload'):
-                        if hasattr(chunk.event.event_payload, 'delta'):
-                            text_chunks.append(chunk.event.event_payload.delta)
+                # Extract text from chunk - llama-stack structure
+                if hasattr(chunk, 'event') and chunk.event is not None:
+                    payload = chunk.event.payload
+                    event_type = payload.event_type
 
-            response_text = "".join(text_chunks)
+                    # Handle turn_complete - final message
+                    if event_type == "turn_complete":
+                        from llama_stack_client.lib.agents.event_logger import interleaved_content_as_str
+                        final_text = interleaved_content_as_str(
+                            payload.turn.output_message.content
+                        )
+                        if final_text:
+                            text_chunks.append(final_text)
+                            await task_updater.update_status(
+                                TaskState.working,
+                                message=new_agent_text_message(
+                                    "".join(text_chunks),
+                                    context_id=context_id,
+                                    task_id=task_id
+                                )
+                            )
 
-            # Send response message using SDK utility
-            await event_queue.enqueue_event(new_agent_text_message(response_text))
+                    # Handle streaming inference tokens
+                    elif event_type == "step_progress":
+                        if hasattr(payload, 'delta') and payload.delta.type == "text":
+                            delta_text = payload.delta.text
+                            if delta_text:
+                                text_chunks.append(delta_text)
+                                # Send incremental update with working status
+                                await task_updater.update_status(
+                                    TaskState.working,
+                                    message=new_agent_text_message(
+                                        "".join(text_chunks),
+                                        context_id=context_id,
+                                        task_id=task_id
+                                    )
+                                )
+
+            # Mark task as complete
+            # Note: The final message is already sent via the last update_status call
+            # await task_updater.complete()
 
         except Exception as exc:  # pylint: disable=broad-except
             logger.error("Error executing agent: %s", str(exc), exc_info=True)
-            await event_queue.enqueue_event(
-                new_agent_text_message(f"Sorry, I encountered an error: {str(exc)}")
+            await task_updater.failed(
+                message=new_agent_text_message(
+                    f"Sorry, I encountered an error: {str(exc)}",
+                    context_id=context_id,
+                    task_id=task_id
+                )
             )
 
     async def cancel(
