@@ -173,6 +173,7 @@ class LightspeedAgentExecutor(AgentExecutor):
             # Process stream and send incremental updates
             text_chunks = []
             is_complete = False
+            streamed_any_delta = False
 
             async for chunk in stream:
                 # Extract text from chunk - llama-stack structure
@@ -186,16 +187,18 @@ class LightspeedAgentExecutor(AgentExecutor):
                         final_text = interleaved_content_as_str(
                             payload.turn.output_message.content
                         )
-                        if final_text:
+                        # If we already streamed deltas, avoid re-appending full content
+                        if final_text and not streamed_any_delta:
                             text_chunks.append(final_text)
 
                         # Mark that we've received the complete turn
                         is_complete = True
 
                         # Send final message and mark task as complete
+                        # If deltas were streamed, avoid duplicating content by sending empty final text
                         await task_updater.complete(
                             message=new_agent_text_message(
-                                "".join(text_chunks),
+                                "".join(text_chunks) if (text_chunks and not streamed_any_delta) else "",
                                 context_id=context_id,
                                 task_id=task_id
                             )
@@ -207,12 +210,13 @@ class LightspeedAgentExecutor(AgentExecutor):
                         if hasattr(payload, 'delta') and payload.delta.type == "text":
                             delta_text = payload.delta.text
                             if delta_text:
-                                text_chunks.append(delta_text)
+                                # Stream token delta only to avoid duplication downstream
+                                streamed_any_delta = True
                                 # Send incremental update with working status
                                 await task_updater.update_status(
                                     TaskState.working,
                                     message=new_agent_text_message(
-                                        "".join(text_chunks),
+                                        delta_text,
                                         context_id=context_id,
                                         task_id=task_id
                                     )
@@ -221,9 +225,11 @@ class LightspeedAgentExecutor(AgentExecutor):
             # Fallback: If we exited the loop without completing, mark as complete anyway
             if not is_complete:
                 logger.warning("Stream ended without turn_complete event, marking task as complete")
+                # If deltas were streamed, avoid duplicating content by sending empty final text
+                final_content = "" if streamed_any_delta else ("".join(text_chunks) if text_chunks else "Task completed")
                 await task_updater.complete(
                     message=new_agent_text_message(
-                        "".join(text_chunks) if text_chunks else "Task completed",
+                        final_content,
                         context_id=context_id,
                         task_id=task_id
                     )
