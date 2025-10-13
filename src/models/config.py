@@ -484,6 +484,8 @@ class Customization(ConfigurationBase):
     disable_query_system_prompt: bool = False
     system_prompt_path: Optional[FilePath] = None
     system_prompt: Optional[str] = None
+    agent_card_path: Optional[FilePath] = None
+    agent_card_config: Optional[dict[str, Any]] = None
     custom_profile: Optional[CustomProfile] = Field(default=None, init=False)
 
     @model_validator(mode="after")
@@ -496,6 +498,14 @@ class Customization(ConfigurationBase):
             self.system_prompt = checks.get_attribute_from_file(
                 dict(self), "system_prompt_path"
             )
+
+        # Load agent card configuration from YAML file
+        if self.agent_card_path is not None:
+            checks.file_check(self.agent_card_path, "agent card")
+            import yaml
+            with open(self.agent_card_path, "r", encoding="utf-8") as f:
+                self.agent_card_config = yaml.safe_load(f)
+
         return self
 
 

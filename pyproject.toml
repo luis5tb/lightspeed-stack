@@ -53,6 +53,8 @@ dependencies = [
     # Used by authorization resolvers
     "jsonpath-ng>=1.6.1",
     "psycopg2-binary>=2.9.10",
+    # Used for agent card configuration
+    "PyYAML>=6.0.0",
 ]
 
 
