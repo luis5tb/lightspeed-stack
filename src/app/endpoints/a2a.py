@@ -319,12 +319,77 @@ def get_lightspeed_agent_card() -> AgentCard:
     """
     Generate the A2A Agent Card for Lightspeed.
 
+    If agent_card_path is configured, loads the agent card from the YAML file.
+    Otherwise, uses default hardcoded values.
+
     Returns:
         AgentCard: The agent card describing Lightspeed's capabilities.
     """
     # Get base URL from configuration or construct it
     service_config = configuration.service_configuration
     base_url = getattr(service_config, 'base_url', 'http://localhost:8080')
+
+    # Check if agent card is configured via file
+    if (
+        configuration.customization is not None
+        and configuration.customization.agent_card_config is not None
+    ):
+        config = configuration.customization.agent_card_config
+
+        # Parse skills from config
+        skills = [
+            AgentSkill(
+                id=skill.get("id"),
+                name=skill.get("name"),
+                description=skill.get("description"),
+                tags=skill.get("tags", []),
+                inputModes=skill.get("inputModes", []),
+                outputModes=skill.get("outputModes", []),
+                examples=skill.get("examples", [])
+            )
+            for skill in config.get("skills", [])
+        ]
+
+        # Parse provider from config
+        provider_config = config.get("provider", {})
+        provider = AgentProvider(
+            organization=provider_config.get("organization", ""),
+            url=provider_config.get("url", "")
+        )
+
+        # Parse capabilities from config
+        capabilities_config = config.get("capabilities", {})
+        capabilities = AgentCapabilities(
+            streaming=capabilities_config.get("streaming", True),
+            pushNotifications=capabilities_config.get("pushNotifications", False),
+            stateTransitionHistory=capabilities_config.get("stateTransitionHistory", False)
+        )
+
+        return AgentCard(
+            name=config.get("name", "Lightspeed AI Assistant"),
+            description=config.get("description", ""),
+            version=__version__,
+            url=f"{base_url}/a2a",
+            documentationUrl=f"{base_url}/docs",
+            provider=provider,
+            skills=skills,
+            defaultInputModes=config.get("defaultInputModes", ["text/plain"]),
+            defaultOutputModes=config.get("defaultOutputModes", ["text/plain"]),
+            capabilities=capabilities,
+            protocolVersion="0.2.1",
+            security=config.get("security", [{"bearer": []}]),
+            security_schemes=config.get("security_schemes", {
+                "bearer": {
+                    "type": "http",
+                    "scheme": "bearer",
+                    "bearer_format": "JWT",
+                    "description": "Bearer token for authentication"
+                }
+            })
+        )
+
+    # Fallback to default hardcoded agent card
+    logger.info("Using default hardcoded agent card (no agent_card_path configured)")
 
     # Define Lightspeed's skills for OpenShift cluster installation
     skills = [
