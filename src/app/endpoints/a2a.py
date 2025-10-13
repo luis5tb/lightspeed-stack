@@ -13,6 +13,8 @@ from a2a.types import (
     AgentCapabilities,
     Task,
     TaskState,
+    Part,
+    TextPart,
 )
 from a2a.server.agent_execution import AgentExecutor, RequestContext
 from a2a.server.events import EventQueue
@@ -41,6 +43,17 @@ logger = logging.getLogger("app.endpoints.a2a")
 router = APIRouter(tags=["a2a"])
 
 auth_dependency = get_auth_dependency()
+
+
+# -----------------------------
+# Persistent State (multi-turn)
+# -----------------------------
+# Keep a single TaskStore instance so tasks persist across requests and
+# previous messages remain connected to the current request.
+_TASK_STORE = InMemoryTaskStore()
+
+# Map A2A contextId -> Llama Stack conversationId to preserve history across turns
+_CONTEXT_TO_CONVERSATION: dict[str, str] = {}
 
 
 # -----------------------------
@@ -128,12 +141,15 @@ class LightspeedAgentExecutor(AgentExecutor):
             # Extract user input using SDK utility
             user_input = context.get_user_input()
             if not user_input:
-                await task_updater.failed(
+                await task_updater.update_status(
+                    TaskState.input_required,
                     message=new_agent_text_message(
                         "I didn't receive any input. How can I help you with OpenShift installation?",
                         context_id=context_id,
-                        task_id=task_id
-                    )
+                        task_id=task_id,
+
+                    ),
+                    final=True,
                 )
                 return
 
@@ -142,14 +158,18 @@ class LightspeedAgentExecutor(AgentExecutor):
 
             # Extract routing metadata from context
             metadata = context.message.metadata if context.message else {}
-            conversation_id = metadata.get("conversation_id") if metadata else None
             model = metadata.get("model") if metadata else None
             provider = metadata.get("provider") if metadata else None
 
-            # Build internal query request
+            # Resolve conversation_id from A2A contextId to preserve multi-turn history
+            a2a_context_id = context_id
+            conversation_id_hint = _CONTEXT_TO_CONVERSATION.get(a2a_context_id)
+            logger.info("A2A contextId %s maps to conversation_id %s", a2a_context_id, conversation_id_hint)
+
+            # Build internal query request with conversation_id for history
             query_request = QueryRequest(
                 query=user_input,
-                conversation_id=conversation_id,
+                conversation_id=conversation_id_hint,
                 model=model,
                 provider=provider,
             )
@@ -170,9 +190,17 @@ class LightspeedAgentExecutor(AgentExecutor):
                 mcp_headers=self.mcp_headers,
             )
 
-            # Process stream and send incremental updates
-            text_chunks = []
-            is_complete = False
+            # Persist conversationId for next turn in same A2A context
+            if conversation_id:
+                _CONTEXT_TO_CONVERSATION[a2a_context_id] = conversation_id
+                logger.info("Persisted conversation_id %s for A2A contextId %s", conversation_id, a2a_context_id)
+
+            # Stream incremental updates: emit working status with text deltas.
+            # Terminal conditions:
+            #   - turn_awaiting_input -> TaskState.input_required with accumulated text
+            #   - turn_complete -> TaskState.completed (final), leverage contextId for follow-ups
+            final_event_sent = False
+            accumulated_text_chunks: list[str] = []
             streamed_any_delta = False
 
             async for chunk in stream:
@@ -181,38 +209,52 @@ class LightspeedAgentExecutor(AgentExecutor):
                     payload = chunk.event.payload
                     event_type = payload.event_type
 
-                    # Handle turn_complete - final message
-                    if event_type == "turn_complete":
-                        from llama_stack_client.lib.agents.event_logger import interleaved_content_as_str
-                        final_text = interleaved_content_as_str(
-                            payload.turn.output_message.content
-                        )
-                        # If we already streamed deltas, avoid re-appending full content
-                        if final_text and not streamed_any_delta:
-                            text_chunks.append(final_text)
-
-                        # Mark that we've received the complete turn
-                        is_complete = True
-
-                        # Send final message and mark task as complete
-                        # If deltas were streamed, avoid duplicating content by sending empty final text
-                        await task_updater.complete(
-                            message=new_agent_text_message(
-                                "".join(text_chunks) if (text_chunks and not streamed_any_delta) else "",
-                                context_id=context_id,
-                                task_id=task_id
+                    # Handle turn_awaiting_input - request more input with accumulated text
+                    if event_type == "turn_awaiting_input":
+                        try:
+                            final_text = "" if streamed_any_delta else "".join(accumulated_text_chunks)
+                            await task_updater.update_status(
+                                TaskState.input_required,
+                                message=new_agent_text_message(
+                                    final_text,
+                                    context_id=context_id,
+                                    task_id=task_id,
+                                ),
+                                final=True,
                             )
-                        )
-                        logger.info("Task %s completed successfully", task_id)
+                            final_event_sent = True
+                            logger.info("Input required for task %s", task_id)
+                        except Exception:  # pylint: disable=broad-except
+                            logger.debug("Error sending input_required status", exc_info=True)
+                            # End the stream for this turn after requesting input
+                            break
+
+                    # Handle turn_complete - complete the task for this turn
+                    elif event_type == "turn_complete":
+                        try:
+                            final_text = "" if streamed_any_delta else "".join(accumulated_text_chunks)
+                            await task_updater.update_status(
+                                TaskState.completed,
+                                message=new_agent_text_message(
+                                    final_text,
+                                    context_id=context_id,
+                                    task_id=task_id,
+                                ),
+                                final=True,
+                            )
+                            final_event_sent = True
+                        except Exception:  # pylint: disable=broad-except
+                            logger.debug("Error sending completed on turn_complete", exc_info=True)
+                        logger.info("Turn completed for task %s", task_id)
+                        # End the stream for this turn
+                        break
 
                     # Handle streaming inference tokens
                     elif event_type == "step_progress":
                         if hasattr(payload, 'delta') and payload.delta.type == "text":
                             delta_text = payload.delta.text
                             if delta_text:
-                                # Stream token delta only to avoid duplication downstream
-                                streamed_any_delta = True
-                                # Send incremental update with working status
+                                accumulated_text_chunks.append(delta_text)
                                 await task_updater.update_status(
                                     TaskState.working,
                                     message=new_agent_text_message(
@@ -221,28 +263,34 @@ class LightspeedAgentExecutor(AgentExecutor):
                                         task_id=task_id
                                     )
                                 )
+                                streamed_any_delta = True
 
-            # Fallback: If we exited the loop without completing, mark as complete anyway
-            if not is_complete:
-                logger.warning("Stream ended without turn_complete event, marking task as complete")
-                # If deltas were streamed, avoid duplicating content by sending empty final text
-                final_content = "" if streamed_any_delta else ("".join(text_chunks) if text_chunks else "Task completed")
-                await task_updater.complete(
-                    message=new_agent_text_message(
-                        final_content,
-                        context_id=context_id,
-                        task_id=task_id
+            # Ensure exactly one terminal status per turn
+            if not final_event_sent:
+                try:
+                    final_text = "" if streamed_any_delta else "".join(accumulated_text_chunks)
+                    await task_updater.update_status(
+                        TaskState.completed,
+                        message=new_agent_text_message(
+                            final_text,
+                            context_id=context_id,
+                            task_id=task_id,
+                        ),
+                        final=True,
                     )
-                )
+                except Exception:  # pylint: disable=broad-except
+                    logger.debug("Error sending fallback completed status", exc_info=True)
 
         except Exception as exc:  # pylint: disable=broad-except
             logger.error("Error executing agent: %s", str(exc), exc_info=True)
-            await task_updater.failed(
+            await task_updater.update_status(
+                TaskState.failed,
                 message=new_agent_text_message(
                     f"Sorry, I encountered an error: {str(exc)}",
                     context_id=context_id,
                     task_id=task_id
-                )
+                ),
+                final=True,
             )
 
     async def cancel(
@@ -415,7 +463,7 @@ def _create_a2a_app(auth_token: str, mcp_headers: dict[str, dict[str, str]]):
 
     request_handler = DefaultRequestHandler(
         agent_executor=agent_executor,
-        task_store=InMemoryTaskStore(),
+        task_store=_TASK_STORE,
     )
 
     a2a_app = A2AStarletteApplication(
