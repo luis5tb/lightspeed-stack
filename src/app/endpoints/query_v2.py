@@ -18,6 +18,7 @@ from app.endpoints.query import (
     query_response,
     select_model_and_provider_id,
     validate_attachments_metadata,
+    get_topic_summary,
 )
 from authentication import get_auth_dependency
 from authentication.interface import AuthTuple
@@ -27,6 +28,7 @@ from configuration import configuration
 import metrics
 from models.config import Action
 from models.database.conversations import UserConversation
+from app.database import get_session
 from models.requests import QueryRequest
 from models.responses import QueryResponse
 from utils.endpoints import (
@@ -102,6 +104,19 @@ async def query_endpoint_handler_v2(
         # Update metrics for the LLM call
         metrics.llm_calls_total.labels(provider_id, model_id).inc()
 
+        # Compute topic summary if this is a brand new conversation
+        topic_summary = None
+        with get_session() as session:
+            existing_conversation = (
+                session.query(UserConversation)
+                .filter_by(id=conversation_id)
+                .first()
+            )
+            if not existing_conversation:
+                topic_summary = await get_topic_summary(
+                    query_request.query, client, model_id
+                )
+
         process_transcript_and_persist_conversation(
             user_id=user_id,
             conversation_id=conversation_id,
@@ -109,6 +124,7 @@ async def query_endpoint_handler_v2(
             provider_id=provider_id,
             query_request=query_request,
             summary=summary,
+            topic_summary=topic_summary,
         )
 
         return QueryResponse(
@@ -350,6 +366,7 @@ def process_transcript_and_persist_conversation(
     provider_id: str,
     query_request: QueryRequest,
     summary: TurnSummary,
+    topic_summary: str | None = None,
 ) -> None:
     """Process transcript storage and persist conversation details."""
     if not is_transcripts_enabled():
@@ -374,4 +391,5 @@ def process_transcript_and_persist_conversation(
         conversation_id=conversation_id,
         model=model_id,
         provider_id=provider_id,
+        topic_summary=topic_summary,
     )
