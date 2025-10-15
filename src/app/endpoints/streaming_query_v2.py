@@ -365,13 +365,13 @@ async def retrieve_response(
     # Prepare tools for responses API
     tools: list[dict[str, Any]] = []
     if not query_request.no_tools:
-        # Get vector databases for RAG tools
-        vector_db_ids = [
-            vector_db.identifier for vector_db in await client.vector_dbs.list()
+        # Get vector stores for RAG tools
+        vector_store_ids = [
+            vector_store.id for vector_store in (await client.vector_stores.list()).data
         ]
 
-        # Add RAG tools if vector databases are available
-        rag_tools = get_rag_tools(vector_db_ids)
+        # Add RAG tools if vector stores are available
+        rag_tools = get_rag_tools(vector_store_ids)
         if rag_tools:
             tools.extend(rag_tools)
 

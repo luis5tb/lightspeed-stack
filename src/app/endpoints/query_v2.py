@@ -193,13 +193,13 @@ async def retrieve_response(  # pylint: disable=too-many-locals,too-many-branche
     # Prepare tools for responses API
     tools: list[dict[str, Any]] = []
     if not query_request.no_tools:
-        # Get vector databases for RAG tools
-        vector_db_ids = [
-            vector_db.identifier for vector_db in await client.vector_dbs.list()
+        # Get vector stores for RAG tools
+        vector_store_ids = [
+            vector_store.id for vector_store in (await client.vector_stores.list()).data
         ]
 
-        # Add RAG tools if vector databases are available
-        rag_tools = get_rag_tools(vector_db_ids)
+        # Add RAG tools if vector stores are available
+        rag_tools = get_rag_tools(vector_store_ids)
         if rag_tools:
             tools.extend(rag_tools)
 
@@ -326,15 +326,15 @@ async def retrieve_response(  # pylint: disable=too-many-locals,too-many-branche
     return summary, conversation_id
 
 
-def get_rag_tools(vector_db_ids: list[str]) -> list[dict[str, Any]] | None:
-    """Convert vector DB IDs to tools format for responses API."""
-    if not vector_db_ids:
+def get_rag_tools(vector_store_ids: list[str]) -> list[dict[str, Any]] | None:
+    """Convert vector store IDs to tools format for responses API."""
+    if not vector_store_ids:
         return None
 
     return [
         {
             "type": "file_search",
-            "vector_store_ids": vector_db_ids,
+            "vector_store_ids": vector_store_ids,
             "max_num_results": 10,
         }
     ]
