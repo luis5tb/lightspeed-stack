@@ -4,7 +4,7 @@ import asyncio
 import json
 import logging
 from datetime import datetime
-from typing import Annotated
+from typing import Annotated, Any
 
 from fastapi import APIRouter, Depends, Request
 from starlette.responses import Response, StreamingResponse
@@ -117,12 +117,12 @@ class LightspeedAgentExecutor(AgentExecutor):
         task = context.current_task
         if not task:
             if not context.message:
-                raise Exception("No message provided in context")
+                raise ValueError("No message provided in context")
             task = new_task(context.message)
             await event_queue.enqueue_event(task)
         return task
 
-    async def _process_task_streaming(
+    async def _process_task_streaming(  # pylint: disable=too-many-locals,too-many-branches,too-many-statements
         self,
         context: RequestContext,
         event_queue: EventQueue,
@@ -375,8 +375,8 @@ def get_lightspeed_agent_card() -> AgentCard:
                 name=skill.get("name"),
                 description=skill.get("description"),
                 tags=skill.get("tags", []),
-                inputModes=skill.get("inputModes", []),
-                outputModes=skill.get("outputModes", []),
+                input_modes=skill.get("inputModes", []),
+                output_modes=skill.get("outputModes", []),
                 examples=skill.get("examples", []),
             )
             for skill in config.get("skills", [])
@@ -393,8 +393,8 @@ def get_lightspeed_agent_card() -> AgentCard:
         capabilities_config = config.get("capabilities", {})
         capabilities = AgentCapabilities(
             streaming=capabilities_config.get("streaming", True),
-            pushNotifications=capabilities_config.get("pushNotifications", False),
-            stateTransitionHistory=capabilities_config.get(
+            push_notifications=capabilities_config.get("pushNotifications", False),
+            state_transition_history=capabilities_config.get(
                 "stateTransitionHistory", False
             ),
         )
@@ -404,25 +404,15 @@ def get_lightspeed_agent_card() -> AgentCard:
             description=config.get("description", ""),
             version=__version__,
             url=f"{base_url}/a2a",
-            documentationUrl=f"{base_url}/docs",
+            documentation_url=f"{base_url}/docs",
             provider=provider,
             skills=skills,
-            defaultInputModes=config.get("defaultInputModes", ["text/plain"]),
-            defaultOutputModes=config.get("defaultOutputModes", ["text/plain"]),
+            default_input_modes=config.get("defaultInputModes", ["text/plain"]),
+            default_output_modes=config.get("defaultOutputModes", ["text/plain"]),
             capabilities=capabilities,
-            protocolVersion="0.2.1",
+            protocol_version="0.2.1",
             security=config.get("security", [{"bearer": []}]),
-            security_schemes=config.get(
-                "security_schemes",
-                {
-                    "bearer": {
-                        "type": "http",
-                        "scheme": "bearer",
-                        "bearer_format": "JWT",
-                        "description": "Bearer token for authentication",
-                    }
-                },
-            ),
+            security_schemes=config.get("security_schemes", {}),
         )
 
     # Fallback to default hardcoded agent card
@@ -438,8 +428,8 @@ def get_lightspeed_agent_card() -> AgentCard:
                 "installation using assisted-installer"
             ),
             tags=["openshift", "installation", "assisted-installer"],
-            inputModes=["text/plain", "application/json"],
-            outputModes=["text/plain", "application/json"],
+            input_modes=["text/plain", "application/json"],
+            output_modes=["text/plain", "application/json"],
             examples=[
                 "How do I install OpenShift using assisted-installer?",
                 "What are the prerequisites for OpenShift installation?",
@@ -453,8 +443,8 @@ def get_lightspeed_agent_card() -> AgentCard:
                 "cluster configuration parameters"
             ),
             tags=["openshift", "configuration", "validation"],
-            inputModes=["application/json", "text/plain"],
-            outputModes=["application/json", "text/plain"],
+            input_modes=["application/json", "text/plain"],
+            output_modes=["application/json", "text/plain"],
             examples=[
                 "Validate my cluster configuration",
                 "Check if my OpenShift setup meets requirements",
@@ -468,8 +458,8 @@ def get_lightspeed_agent_card() -> AgentCard:
                 "and provide solutions"
             ),
             tags=["openshift", "troubleshooting", "support"],
-            inputModes=["text/plain", "application/json"],
-            outputModes=["text/plain", "application/json"],
+            input_modes=["text/plain", "application/json"],
+            output_modes=["text/plain", "application/json"],
             examples=[
                 "My cluster installation is failing",
                 "How do I fix installation errors?",
@@ -483,8 +473,8 @@ def get_lightspeed_agent_card() -> AgentCard:
                 "OpenShift cluster deployment"
             ),
             tags=["openshift", "requirements", "planning"],
-            inputModes=["application/json", "text/plain"],
-            outputModes=["application/json", "text/plain"],
+            input_modes=["application/json", "text/plain"],
+            output_modes=["application/json", "text/plain"],
             examples=[
                 "What hardware do I need for OpenShift?",
                 "Analyze requirements for a 5-node cluster",
@@ -497,7 +487,7 @@ def get_lightspeed_agent_card() -> AgentCard:
 
     # Agent capabilities
     capabilities = AgentCapabilities(
-        streaming=True, pushNotifications=False, stateTransitionHistory=False
+        streaming=True, push_notifications=False, state_transition_history=False
     )
 
     return AgentCard(
@@ -509,22 +499,15 @@ def get_lightspeed_agent_card() -> AgentCard:
         ),
         version=__version__,
         url=f"{base_url}/a2a",
-        documentationUrl=f"{base_url}/docs",
+        documentation_url=f"{base_url}/docs",
         provider=provider,
         skills=skills,
-        defaultInputModes=["text/plain"],
-        defaultOutputModes=["text/plain"],
+        default_input_modes=["text/plain"],
+        default_output_modes=["text/plain"],
         capabilities=capabilities,
-        protocolVersion="0.2.1",
+        protocol_version="0.2.1",
         security=[{"bearer": []}],
-        security_schemes={
-            "bearer": {
-                "type": "http",
-                "scheme": "bearer",
-                "bearer_format": "JWT",
-                "description": "Bearer token for authentication with OpenShift services",
-            }
-        },
+        security_schemes={},
     )
 
 
@@ -533,10 +516,8 @@ def get_lightspeed_agent_card() -> AgentCard:
 # -----------------------------
 @router.get("/.well-known/agent.json", response_model=AgentCard)
 @router.get("/.well-known/agent-card.json", response_model=AgentCard)
-async def get_agent_card(
-    auth: Annotated[
-        AuthTuple, Depends(auth_dependency)
-    ],  # pylint: disable=unused-argument
+async def get_agent_card(  # pylint: disable=unused-argument
+    auth: Annotated[AuthTuple, Depends(auth_dependency)],
 ) -> AgentCard:
     """
     Serve the A2A Agent Card at the well-known location.
@@ -560,7 +541,7 @@ async def get_agent_card(
         raise
 
 
-def _create_a2a_app(auth_token: str, mcp_headers: dict[str, dict[str, str]]):
+def _create_a2a_app(auth_token: str, mcp_headers: dict[str, dict[str, str]]) -> Any:
     """
     Create an A2A Starlette application instance with auth context.
 
@@ -588,13 +569,13 @@ def _create_a2a_app(auth_token: str, mcp_headers: dict[str, dict[str, str]]):
     return a2a_app.build()
 
 
-@router.api_route("/a2a", methods=["GET", "POST"])
+@router.api_route("/a2a", methods=["GET", "POST"], response_model=None)
 @authorize(Action.A2A_JSONRPC)
-async def handle_a2a_jsonrpc(
+async def handle_a2a_jsonrpc(  # pylint: disable=too-many-locals,too-many-statements
     request: Request,
     auth: Annotated[AuthTuple, Depends(auth_dependency)],
     mcp_headers: dict[str, dict[str, str]] = Depends(mcp_headers_dependency),
-):
+) -> Response | StreamingResponse:
     """
     Main A2A JSON-RPC endpoint following the A2A protocol specification.
 
@@ -672,7 +653,7 @@ async def handle_a2a_jsonrpc(
         # Create queue for passing chunks from ASGI app to response generator
         chunk_queue: asyncio.Queue = asyncio.Queue()
 
-        async def streaming_send(message):
+        async def streaming_send(message: dict[str, Any]) -> None:
             """Send callback that queues chunks for streaming."""
             if message["type"] == "http.response.body":
                 body_chunk = message.get("body", b"")
@@ -684,7 +665,7 @@ async def handle_a2a_jsonrpc(
                     await chunk_queue.put(None)
 
         # Run the A2A app in a background task
-        async def run_a2a_app():
+        async def run_a2a_app() -> None:
             """Run A2A app and handle any errors."""
             try:
                 logger.debug("Streaming: Starting A2A app execution")
@@ -699,7 +680,7 @@ async def handle_a2a_jsonrpc(
         # Start the A2A app task
         app_task = asyncio.create_task(run_a2a_app())
 
-        async def response_generator():
+        async def response_generator() -> Any:
             """Generator that yields chunks from the queue."""
             chunk_count = 0
             try:
@@ -748,7 +729,7 @@ async def handle_a2a_jsonrpc(
     status_code = 200
     headers = []
 
-    async def buffering_send(message):
+    async def buffering_send(message: dict[str, Any]) -> None:
         nonlocal response_started, status_code, headers
         if message["type"] == "http.response.start":
             response_started = True
@@ -768,7 +749,7 @@ async def handle_a2a_jsonrpc(
 
 
 @router.get("/a2a/health")
-async def a2a_health_check():
+async def a2a_health_check() -> dict[str, str]:
     """
     Health check endpoint for A2A service.
 
