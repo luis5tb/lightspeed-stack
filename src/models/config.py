@@ -5,6 +5,7 @@ from typing import Optional, Any, Pattern
 from enum import Enum
 from functools import cached_property
 import re
+import yaml
 
 import jsonpath_ng
 from jsonpath_ng.exceptions import JSONPathError
@@ -502,9 +503,18 @@ class Customization(ConfigurationBase):
         # Load agent card configuration from YAML file
         if self.agent_card_path is not None:
             checks.file_check(self.agent_card_path, "agent card")
-            import yaml
-            with open(self.agent_card_path, "r", encoding="utf-8") as f:
-                self.agent_card_config = yaml.safe_load(f)
+
+            try:
+                with open(self.agent_card_path, "r", encoding="utf-8") as f:
+                    self.agent_card_config = yaml.safe_load(f)
+            except yaml.YAMLError as e:
+                raise ValueError(
+                    f"Invalid YAML in agent card file '{self.agent_card_path}': {e}"
+                ) from e
+            except OSError as e:
+                raise ValueError(
+                    f"Unable to read agent card file '{self.agent_card_path}': {e}"
+                ) from e
 
         return self
 

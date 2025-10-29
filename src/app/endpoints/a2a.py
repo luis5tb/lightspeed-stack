@@ -359,7 +359,7 @@ def get_lightspeed_agent_card() -> AgentCard:
     """
     # Get base URL from configuration or construct it
     service_config = configuration.service_configuration
-    base_url = getattr(service_config, "base_url", "http://localhost:8080")
+    base_url = service_config.base_url if service_config.base_url is not None else "http://localhost:8080"
 
     # Check if agent card is configured via file
     if (
@@ -598,8 +598,13 @@ async def handle_a2a_jsonrpc(  # pylint: disable=too-many-locals,too-many-statem
     """
     logger.debug("A2A endpoint called: %s %s", request.method, request.url.path)
 
-    # Extract auth token
-    auth_token = auth[3] if len(auth) > 3 else ""
+    # Extract auth token from AuthTuple
+    # AuthTuple format: (user_id, username, roles, token, ...)
+    try:
+        auth_token = auth[3] if len(auth) > 3 else ""
+    except (IndexError, TypeError):
+        logger.warning("Failed to extract auth token from auth tuple")
+        auth_token = ""
 
     # Create A2A app with auth context
     a2a_app = _create_a2a_app(auth_token, mcp_headers)
