@@ -68,7 +68,9 @@ class LightspeedAgentExecutor(AgentExecutor):
     routing queries to the appropriate LLM backend.
     """
 
-    def __init__(self, auth_token: str, mcp_headers: dict[str, dict[str, str]] | None = None):
+    def __init__(
+        self, auth_token: str, mcp_headers: dict[str, dict[str, str]] | None = None
+    ):
         """
         Initialize the Lightspeed agent executor.
 
@@ -95,12 +97,12 @@ class LightspeedAgentExecutor(AgentExecutor):
         task = await self._prepare_task(context, event_queue)
 
         # Process the task with streaming
-        await self._process_task_streaming(context, event_queue, task.context_id, task.id)
+        await self._process_task_streaming(
+            context, event_queue, task.context_id, task.id
+        )
 
     async def _prepare_task(
-        self,
-        context: RequestContext,
-        event_queue: EventQueue
+        self, context: RequestContext, event_queue: EventQueue
     ) -> Task:
         """
         Get existing task or create a new one.
@@ -125,7 +127,7 @@ class LightspeedAgentExecutor(AgentExecutor):
         context: RequestContext,
         event_queue: EventQueue,
         context_id: str,
-        task_id: str
+        task_id: str,
     ) -> None:
         """
         Process the task with streaming updates.
@@ -165,7 +167,11 @@ class LightspeedAgentExecutor(AgentExecutor):
             # Resolve conversation_id from A2A contextId to preserve multi-turn history
             a2a_context_id = context_id
             conversation_id_hint = _CONTEXT_TO_CONVERSATION.get(a2a_context_id)
-            logger.info("A2A contextId %s maps to conversation_id %s", a2a_context_id, conversation_id_hint)
+            logger.info(
+                "A2A contextId %s maps to conversation_id %s",
+                a2a_context_id,
+                conversation_id_hint,
+            )
 
             # Build internal query request with conversation_id for history
             query_request = QueryRequest(
@@ -177,9 +183,13 @@ class LightspeedAgentExecutor(AgentExecutor):
 
             # Get LLM client and select model
             client = AsyncLlamaStackClientHolder().get_client()
-            llama_stack_model_id, _model_id, _provider_id = select_model_and_provider_id(
-                await client.models.list(),
-                *evaluate_model_hints(user_conversation=None, query_request=query_request),
+            llama_stack_model_id, _model_id, _provider_id = (
+                select_model_and_provider_id(
+                    await client.models.list(),
+                    *evaluate_model_hints(
+                        user_conversation=None, query_request=query_request
+                    ),
+                )
             )
 
             # Stream response from LLM with status updates
@@ -194,7 +204,11 @@ class LightspeedAgentExecutor(AgentExecutor):
             # Persist conversationId for next turn in same A2A context
             if conversation_id:
                 _CONTEXT_TO_CONVERSATION[a2a_context_id] = conversation_id
-                logger.info("Persisted conversation_id %s for A2A contextId %s", conversation_id, a2a_context_id)
+                logger.info(
+                    "Persisted conversation_id %s for A2A contextId %s",
+                    conversation_id,
+                    a2a_context_id,
+                )
 
             # Stream incremental updates: emit working status with text deltas.
             # Terminal conditions:
@@ -230,14 +244,20 @@ class LightspeedAgentExecutor(AgentExecutor):
                             final_event_sent = True
                             logger.info("Input required for task %s", task_id)
                         except Exception:  # pylint: disable=broad-except
-                            logger.debug("Error sending input_required status", exc_info=True)
+                            logger.debug(
+                                "Error sending input_required status", exc_info=True
+                            )
                             # End the stream for this turn after requesting input
                             break
 
                     # Handle turn_complete - complete the task for this turn
                     elif event_type == "turn_complete":
                         try:
-                            final_text = "" if streamed_any_delta else "".join(accumulated_text_chunks)
+                            final_text = (
+                                ""
+                                if streamed_any_delta
+                                else "".join(accumulated_text_chunks)
+                            )
                             await task_updater.update_status(
                                 TaskState.completed,
                                 message=new_agent_text_message(
@@ -249,7 +269,10 @@ class LightspeedAgentExecutor(AgentExecutor):
                             )
                             final_event_sent = True
                         except Exception:  # pylint: disable=broad-except
-                            logger.debug("Error sending completed on turn_complete", exc_info=True)
+                            logger.debug(
+                                "Error sending completed on turn_complete",
+                                exc_info=True,
+                            )
                         logger.info("Turn completed for task %s", task_id)
                         # End the stream for this turn
                         break
@@ -265,15 +288,17 @@ class LightspeedAgentExecutor(AgentExecutor):
                                     message=new_agent_text_message(
                                         delta_text,
                                         context_id=context_id,
-                                        task_id=task_id
-                                    )
+                                        task_id=task_id,
+                                    ),
                                 )
                                 streamed_any_delta = True
 
             # Ensure exactly one terminal status per turn
             if not final_event_sent:
                 try:
-                    final_text = "" if streamed_any_delta else "".join(accumulated_text_chunks)
+                    final_text = (
+                        "" if streamed_any_delta else "".join(accumulated_text_chunks)
+                    )
                     await task_updater.update_status(
                         TaskState.completed,
                         message=new_agent_text_message(
@@ -284,7 +309,9 @@ class LightspeedAgentExecutor(AgentExecutor):
                         final=True,
                     )
                 except Exception:  # pylint: disable=broad-except
-                    logger.debug("Error sending fallback completed status", exc_info=True)
+                    logger.debug(
+                        "Error sending fallback completed status", exc_info=True
+                    )
 
         except Exception as exc:  # pylint: disable=broad-except
             logger.error("Error executing agent: %s", str(exc), exc_info=True)
@@ -293,7 +320,7 @@ class LightspeedAgentExecutor(AgentExecutor):
                 message=new_agent_text_message(
                     f"Sorry, I encountered an error: {str(exc)}",
                     context_id=context_id,
-                    task_id=task_id
+                    task_id=task_id,
                 ),
                 final=True,
             )
@@ -350,7 +377,7 @@ def get_lightspeed_agent_card() -> AgentCard:
                 tags=skill.get("tags", []),
                 inputModes=skill.get("inputModes", []),
                 outputModes=skill.get("outputModes", []),
-                examples=skill.get("examples", [])
+                examples=skill.get("examples", []),
             )
             for skill in config.get("skills", [])
         ]
@@ -359,7 +386,7 @@ def get_lightspeed_agent_card() -> AgentCard:
         provider_config = config.get("provider", {})
         provider = AgentProvider(
             organization=provider_config.get("organization", ""),
-            url=provider_config.get("url", "")
+            url=provider_config.get("url", ""),
         )
 
         # Parse capabilities from config
@@ -367,7 +394,9 @@ def get_lightspeed_agent_card() -> AgentCard:
         capabilities = AgentCapabilities(
             streaming=capabilities_config.get("streaming", True),
             pushNotifications=capabilities_config.get("pushNotifications", False),
-            stateTransitionHistory=capabilities_config.get("stateTransitionHistory", False)
+            stateTransitionHistory=capabilities_config.get(
+                "stateTransitionHistory", False
+            ),
         )
 
         return AgentCard(
@@ -505,7 +534,9 @@ def get_lightspeed_agent_card() -> AgentCard:
 @router.get("/.well-known/agent.json", response_model=AgentCard)
 @router.get("/.well-known/agent-card.json", response_model=AgentCard)
 async def get_agent_card(
-    auth: Annotated[AuthTuple, Depends(auth_dependency)],  # pylint: disable=unused-argument
+    auth: Annotated[
+        AuthTuple, Depends(auth_dependency)
+    ],  # pylint: disable=unused-argument
 ) -> AgentCard:
     """
     Serve the A2A Agent Card at the well-known location.
@@ -682,7 +713,9 @@ async def handle_a2a_jsonrpc(
 
                     if chunk is None:
                         # End of stream
-                        logger.debug("Streaming: Stream ended after %d chunks", chunk_count)
+                        logger.debug(
+                            "Streaming: Stream ended after %d chunks", chunk_count
+                        )
                         break
                     chunk_count += 1
                     yield chunk
@@ -747,5 +780,5 @@ async def a2a_health_check():
         "service": "lightspeed-a2a",
         "version": __version__,
         "a2a_sdk_version": "0.2.1",
-        "timestamp": datetime.now().isoformat()
+        "timestamp": datetime.now().isoformat(),
     }
