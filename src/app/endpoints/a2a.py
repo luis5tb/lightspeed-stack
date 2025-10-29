@@ -1,10 +1,13 @@
 """Handler for A2A (Agent-to-Agent) protocol endpoints."""
 
+import asyncio
+import json
 import logging
 from datetime import datetime
 from typing import Annotated
 
 from fastapi import APIRouter, Depends, Request
+from starlette.responses import Response, StreamingResponse
 
 from a2a.types import (
     AgentCard,
@@ -13,8 +16,6 @@ from a2a.types import (
     AgentCapabilities,
     Task,
     TaskState,
-    Part,
-    TextPart,
 )
 from a2a.server.agent_execution import AgentExecutor, RequestContext
 from a2a.server.events import EventQueue
@@ -39,7 +40,7 @@ from client import AsyncLlamaStackClientHolder
 from utils.mcp_headers import mcp_headers_dependency
 from version import __version__
 
-logger = logging.getLogger("app.endpoints.a2a")
+logger = logging.getLogger("app.endpoints.handlers")
 router = APIRouter(tags=["a2a"])
 
 auth_dependency = get_auth_dependency()
@@ -144,10 +145,10 @@ class LightspeedAgentExecutor(AgentExecutor):
                 await task_updater.update_status(
                     TaskState.input_required,
                     message=new_agent_text_message(
-                        "I didn't receive any input. How can I help you with OpenShift installation?",
+                        "I didn't receive any input. "
+                        "How can I help you with OpenShift installation?",
                         context_id=context_id,
                         task_id=task_id,
-
                     ),
                     final=True,
                 )
@@ -205,14 +206,18 @@ class LightspeedAgentExecutor(AgentExecutor):
 
             async for chunk in stream:
                 # Extract text from chunk - llama-stack structure
-                if hasattr(chunk, 'event') and chunk.event is not None:
+                if hasattr(chunk, "event") and chunk.event is not None:
                     payload = chunk.event.payload
                     event_type = payload.event_type
 
                     # Handle turn_awaiting_input - request more input with accumulated text
                     if event_type == "turn_awaiting_input":
                         try:
-                            final_text = "" if streamed_any_delta else "".join(accumulated_text_chunks)
+                            final_text = (
+                                ""
+                                if streamed_any_delta
+                                else "".join(accumulated_text_chunks)
+                            )
                             await task_updater.update_status(
                                 TaskState.input_required,
                                 message=new_agent_text_message(
@@ -251,7 +256,7 @@ class LightspeedAgentExecutor(AgentExecutor):
 
                     # Handle streaming inference tokens
                     elif event_type == "step_progress":
-                        if hasattr(payload, 'delta') and payload.delta.type == "text":
+                        if hasattr(payload, "delta") and payload.delta.type == "text":
                             delta_text = payload.delta.text
                             if delta_text:
                                 accumulated_text_chunks.append(delta_text)
@@ -327,7 +332,7 @@ def get_lightspeed_agent_card() -> AgentCard:
     """
     # Get base URL from configuration or construct it
     service_config = configuration.service_configuration
-    base_url = getattr(service_config, 'base_url', 'http://localhost:8080')
+    base_url = getattr(service_config, "base_url", "http://localhost:8080")
 
     # Check if agent card is configured via file
     if (
@@ -378,14 +383,17 @@ def get_lightspeed_agent_card() -> AgentCard:
             capabilities=capabilities,
             protocolVersion="0.2.1",
             security=config.get("security", [{"bearer": []}]),
-            security_schemes=config.get("security_schemes", {
-                "bearer": {
-                    "type": "http",
-                    "scheme": "bearer",
-                    "bearer_format": "JWT",
-                    "description": "Bearer token for authentication"
-                }
-            })
+            security_schemes=config.get(
+                "security_schemes",
+                {
+                    "bearer": {
+                        "type": "http",
+                        "scheme": "bearer",
+                        "bearer_format": "JWT",
+                        "description": "Bearer token for authentication",
+                    }
+                },
+            ),
         )
 
     # Fallback to default hardcoded agent card
@@ -396,69 +404,80 @@ def get_lightspeed_agent_card() -> AgentCard:
         AgentSkill(
             id="cluster_installation_guidance",
             name="Cluster Installation Guidance",
-            description="Provide guidance and assistance for OpenShift cluster installation using assisted-installer",
+            description=(
+                "Provide guidance and assistance for OpenShift cluster "
+                "installation using assisted-installer"
+            ),
             tags=["openshift", "installation", "assisted-installer"],
             inputModes=["text/plain", "application/json"],
             outputModes=["text/plain", "application/json"],
             examples=[
                 "How do I install OpenShift using assisted-installer?",
-                "What are the prerequisites for OpenShift installation?"
-            ]
+                "What are the prerequisites for OpenShift installation?",
+            ],
         ),
         AgentSkill(
             id="cluster_configuration_validation",
             name="Cluster Configuration Validation",
-            description="Validate and provide recommendations for OpenShift cluster configuration parameters",
+            description=(
+                "Validate and provide recommendations for OpenShift "
+                "cluster configuration parameters"
+            ),
             tags=["openshift", "configuration", "validation"],
             inputModes=["application/json", "text/plain"],
             outputModes=["application/json", "text/plain"],
             examples=[
                 "Validate my cluster configuration",
-                "Check if my OpenShift setup meets requirements"
-            ]
+                "Check if my OpenShift setup meets requirements",
+            ],
         ),
         AgentSkill(
             id="installation_troubleshooting",
             name="Installation Troubleshooting",
-            description="Help troubleshoot OpenShift cluster installation issues and provide solutions",
+            description=(
+                "Help troubleshoot OpenShift cluster installation issues "
+                "and provide solutions"
+            ),
             tags=["openshift", "troubleshooting", "support"],
             inputModes=["text/plain", "application/json"],
             outputModes=["text/plain", "application/json"],
             examples=[
                 "My cluster installation is failing",
-                "How do I fix installation errors?"
-            ]
+                "How do I fix installation errors?",
+            ],
         ),
         AgentSkill(
             id="cluster_requirements_analysis",
             name="Cluster Requirements Analysis",
-            description="Analyze infrastructure requirements for OpenShift cluster deployment",
+            description=(
+                "Analyze infrastructure requirements for "
+                "OpenShift cluster deployment"
+            ),
             tags=["openshift", "requirements", "planning"],
             inputModes=["application/json", "text/plain"],
             outputModes=["application/json", "text/plain"],
             examples=[
                 "What hardware do I need for OpenShift?",
-                "Analyze requirements for a 5-node cluster"
-            ]
-        )
+                "Analyze requirements for a 5-node cluster",
+            ],
+        ),
     ]
 
     # Provider information
-    provider = AgentProvider(
-        organization="Red Hat",
-        url="https://redhat.com"
-    )
+    provider = AgentProvider(organization="Red Hat", url="https://redhat.com")
 
     # Agent capabilities
     capabilities = AgentCapabilities(
-        streaming=True,
-        pushNotifications=False,
-        stateTransitionHistory=False
+        streaming=True, pushNotifications=False, stateTransitionHistory=False
     )
 
     return AgentCard(
         name="OpenShift Assisted Installer AI Assistant",
-        description="AI-powered assistant specialized in OpenShift cluster installation, configuration, and troubleshooting using assisted-installer backend",
+        description=(
+            "AI-powered assistant specialized in OpenShift cluster "
+            "installation, configuration, and troubleshooting using "
+            "assisted-installer backend"
+        ),
         version=__version__,
         url=f"{base_url}/a2a",
         documentationUrl=f"{base_url}/docs",
@@ -468,19 +487,15 @@ def get_lightspeed_agent_card() -> AgentCard:
         defaultOutputModes=["text/plain"],
         capabilities=capabilities,
         protocolVersion="0.2.1",
-        security=[
-            {
-                "bearer": []
-            }
-        ],
+        security=[{"bearer": []}],
         security_schemes={
             "bearer": {
                 "type": "http",
                 "scheme": "bearer",
                 "bearer_format": "JWT",
-                "description": "Bearer token for authentication with OpenShift services"
+                "description": "Bearer token for authentication with OpenShift services",
             }
-        }
+        },
     )
 
 
@@ -489,7 +504,6 @@ def get_lightspeed_agent_card() -> AgentCard:
 # -----------------------------
 @router.get("/.well-known/agent.json", response_model=AgentCard)
 @router.get("/.well-known/agent-card.json", response_model=AgentCard)
-@authorize(Action.A2A_AGENT_CARD)
 async def get_agent_card(
     auth: Annotated[AuthTuple, Depends(auth_dependency)],  # pylint: disable=unused-argument
 ) -> AgentCard:
@@ -504,7 +518,12 @@ async def get_agent_card(
     """
     try:
         logger.info("Serving A2A Agent Card")
-        return get_lightspeed_agent_card()
+        agent_card = get_lightspeed_agent_card()
+        logger.info("Agent Card URL: %s", agent_card.url)
+        logger.info(
+            "Agent Card capabilities: streaming=%s", agent_card.capabilities.streaming
+        )
+        return agent_card
     except Exception as exc:
         logger.error("Error serving A2A Agent Card: %s", str(exc))
         raise
@@ -522,8 +541,7 @@ def _create_a2a_app(auth_token: str, mcp_headers: dict[str, dict[str, str]]):
         A2A Starlette ASGI application
     """
     agent_executor = LightspeedAgentExecutor(
-        auth_token=auth_token,
-        mcp_headers=mcp_headers
+        auth_token=auth_token, mcp_headers=mcp_headers
     )
 
     request_handler = DefaultRequestHandler(
@@ -555,6 +573,9 @@ async def handle_a2a_jsonrpc(
     The A2A SDK application is created per-request to include authentication
     context while still leveraging FastAPI's authorization middleware.
 
+    Automatically detects streaming requests (message/stream JSON-RPC method)
+    and returns a StreamingResponse to enable real-time chunk delivery.
+
     Args:
         request: FastAPI request object
         auth: Authentication tuple
@@ -563,43 +584,153 @@ async def handle_a2a_jsonrpc(
     Returns:
         JSON-RPC response or streaming response
     """
+    logger.debug("A2A endpoint called: %s %s", request.method, request.url.path)
+
     # Extract auth token
     auth_token = auth[3] if len(auth) > 3 else ""
 
     # Create A2A app with auth context
     a2a_app = _create_a2a_app(auth_token, mcp_headers)
 
-    # Forward the request to the A2A app
-    # The A2A SDK will handle all JSON-RPC protocol details
-    from starlette.responses import Response
+    # Detect if this is a streaming request by checking the JSON-RPC method
+    is_streaming_request = False
+    body = b""
+    try:
+        # Read and parse the request body to check the method
+        body = await request.body()
+        logger.debug("A2A request body size: %d bytes", len(body))
+        if body:
+            try:
+                rpc_request = json.loads(body)
+                # Check if the method is message/stream
+                method = rpc_request.get("method", "")
+                is_streaming_request = method == "message/stream"
+                logger.info(
+                    "A2A request method: %s, streaming: %s",
+                    method,
+                    is_streaming_request,
+                )
+            except (json.JSONDecodeError, AttributeError) as e:
+                logger.warning(
+                    "Could not parse A2A request body for method detection: %s", str(e)
+                )
+    except Exception as e:  # pylint: disable=broad-except
+        logger.error("Error detecting streaming request: %s", str(e))
 
+    # Setup scope for A2A app
     scope = request.scope.copy()
-    scope['path'] = '/'  # A2A app expects root path
+    scope["path"] = "/"  # A2A app expects root path
+
+    # We need to re-provide the body since we already read it
+    body_sent = False
 
     async def receive():
+        nonlocal body_sent
+        if not body_sent:
+            body_sent = True
+            return {"type": "http.request", "body": body, "more_body": False}
+
+        # After sending body once, delegate to original receive
+        # This prevents infinite loops - the original receive() will block/disconnect properly
         return await request.receive()
+
+    if is_streaming_request:
+        # Streaming mode: Forward chunks to client as they arrive
+        logger.info("Handling A2A streaming request")
+
+        # Create queue for passing chunks from ASGI app to response generator
+        chunk_queue: asyncio.Queue = asyncio.Queue()
+
+        async def streaming_send(message):
+            """Send callback that queues chunks for streaming."""
+            if message["type"] == "http.response.body":
+                body_chunk = message.get("body", b"")
+                if body_chunk:
+                    await chunk_queue.put(body_chunk)
+                # Signal end of stream if no more body
+                if not message.get("more_body", False):
+                    logger.debug("Streaming: End of stream signaled")
+                    await chunk_queue.put(None)
+
+        # Run the A2A app in a background task
+        async def run_a2a_app():
+            """Run A2A app and handle any errors."""
+            try:
+                logger.debug("Streaming: Starting A2A app execution")
+                await a2a_app(scope, receive, streaming_send)
+                logger.debug("Streaming: A2A app execution completed")
+            except Exception as exc:  # pylint: disable=broad-except
+                logger.error(
+                    "Error in A2A app during streaming: %s", str(exc), exc_info=True
+                )
+                await chunk_queue.put(None)  # Signal end even on error
+
+        # Start the A2A app task
+        app_task = asyncio.create_task(run_a2a_app())
+
+        async def response_generator():
+            """Generator that yields chunks from the queue."""
+            chunk_count = 0
+            try:
+                while True:
+                    # Get chunk from queue with timeout to prevent hanging
+                    try:
+                        chunk = await asyncio.wait_for(chunk_queue.get(), timeout=300.0)
+                    except asyncio.TimeoutError:
+                        logger.error("Timeout waiting for chunk from A2A app")
+                        break
+
+                    if chunk is None:
+                        # End of stream
+                        logger.debug("Streaming: Stream ended after %d chunks", chunk_count)
+                        break
+                    chunk_count += 1
+                    yield chunk
+            finally:
+                # Ensure the app task is cleaned up
+                if not app_task.done():
+                    app_task.cancel()
+                    try:
+                        await app_task
+                    except asyncio.CancelledError:
+                        pass
+
+        # Return streaming response immediately
+        # The status code and headers will be determined by the first chunk
+        # We can't wait for the response to start because that would cause a deadlock:
+        # the ASGI app won't send data until the client starts consuming
+        logger.debug("Streaming: Returning StreamingResponse")
+
+        # Return streaming response with SSE content type for A2A protocol
+        return StreamingResponse(
+            response_generator(),
+            media_type="text/event-stream",
+        )
+
+    # Non-streaming mode: Buffer entire response
+    logger.info("Handling A2A non-streaming request")
 
     response_started = False
     response_body = []
     status_code = 200
     headers = []
 
-    async def send(message):
+    async def buffering_send(message):
         nonlocal response_started, status_code, headers
-        if message['type'] == 'http.response.start':
+        if message["type"] == "http.response.start":
             response_started = True
-            status_code = message['status']
-            headers = message.get('headers', [])
-        elif message['type'] == 'http.response.body':
-            response_body.append(message.get('body', b''))
+            status_code = message["status"]
+            headers = message.get("headers", [])
+        elif message["type"] == "http.response.body":
+            response_body.append(message.get("body", b""))
 
-    await a2a_app(scope, receive, send)
+    await a2a_app(scope, receive, buffering_send)
 
     # Return the response from A2A app
     return Response(
-        content=b''.join(response_body),
+        content=b"".join(response_body),
         status_code=status_code,
-        headers=dict((k.decode(), v.decode()) for k, v in headers)
+        headers=dict((k.decode(), v.decode()) for k, v in headers),
     )
 
 
