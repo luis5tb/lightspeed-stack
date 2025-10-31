@@ -3,6 +3,7 @@
 import asyncio
 import json
 import logging
+import uuid
 from datetime import datetime
 from typing import Annotated, Any
 
@@ -14,8 +15,10 @@ from a2a.types import (
     AgentSkill,
     AgentProvider,
     AgentCapabilities,
+    Part,
     Task,
     TaskState,
+    TextPart,
 )
 from a2a.server.agent_execution import AgentExecutor, RequestContext
 from a2a.server.events import EventQueue
@@ -218,6 +221,7 @@ class LightspeedAgentExecutor(AgentExecutor):
             accumulated_text_chunks: list[str] = []
             streamed_any_delta = False
 
+            artifact_id = str(uuid.uuid4())
             async for chunk in stream:
                 # Extract text from chunk - llama-stack structure
                 if hasattr(chunk, "event") and chunk.event is not None:
@@ -226,6 +230,7 @@ class LightspeedAgentExecutor(AgentExecutor):
 
                     # Handle turn_awaiting_input - request more input with accumulated text
                     if event_type == "turn_awaiting_input":
+                        logger.debug("Turn awaiting input")
                         try:
                             final_text = (
                                 ""
@@ -252,21 +257,36 @@ class LightspeedAgentExecutor(AgentExecutor):
 
                     # Handle turn_complete - complete the task for this turn
                     elif event_type == "turn_complete":
+                        logger.debug("Turn complete event")
                         try:
                             final_text = (
                                 ""
                                 if streamed_any_delta
                                 else "".join(accumulated_text_chunks)
                             )
-                            await task_updater.update_status(
-                                TaskState.completed,
-                                message=new_agent_text_message(
-                                    final_text,
-                                    context_id=context_id,
-                                    task_id=task_id,
-                                ),
-                                final=True,
+                            # await task_updater.update_status(
+                            #     TaskState.completed,
+                            #     message=new_agent_text_message(
+                            #         final_text,
+                            #         context_id=context_id,
+                            #         task_id=task_id,
+                            #     ),
+                            #     final=True,
+                            # )
+                            task_metadata = {
+                                "conversation_id": str(conversation_id),
+                                "message_id": str(chunk.event.payload.turn.turn_id),
+                                "sources": None
+                            }
+
+                            await task_updater.add_artifact(
+                                parts=[Part(root=TextPart(text=final_text))],
+                                artifact_id=artifact_id,
+                                metadata=task_metadata,
+                                append=streamed_any_delta,
+                                last_chunk=True
                             )
+                            await task_updater.complete()
                             final_event_sent = True
                         except Exception:  # pylint: disable=broad-except
                             logger.debug(
@@ -283,13 +303,20 @@ class LightspeedAgentExecutor(AgentExecutor):
                             delta_text = payload.delta.text
                             if delta_text:
                                 accumulated_text_chunks.append(delta_text)
-                                await task_updater.update_status(
-                                    TaskState.working,
-                                    message=new_agent_text_message(
-                                        delta_text,
-                                        context_id=context_id,
-                                        task_id=task_id,
-                                    ),
+                                logger.debug("Step progress, delta test: %s", delta_text)
+                                # await task_updater.update_status(
+                                #     TaskState.working,
+                                #     message=new_agent_text_message(
+                                #         delta_text,
+                                #         context_id=context_id,
+                                #         task_id=task_id,
+                                #     ),
+                                # )
+                                await task_updater.add_artifact(
+                                    parts=[Part(root=TextPart(text=delta_text))],
+                                    artifact_id=artifact_id,
+                                    metadata=None,
+                                    append=streamed_any_delta,
                                 )
                                 streamed_any_delta = True
 
@@ -299,15 +326,23 @@ class LightspeedAgentExecutor(AgentExecutor):
                     final_text = (
                         "" if streamed_any_delta else "".join(accumulated_text_chunks)
                     )
-                    await task_updater.update_status(
-                        TaskState.completed,
-                        message=new_agent_text_message(
-                            final_text,
-                            context_id=context_id,
-                            task_id=task_id,
-                        ),
-                        final=True,
-                    )
+                    # await task_updater.update_status(
+                    #     TaskState.completed,
+                    #     message=new_agent_text_message(
+                    #         final_text,
+                    #         context_id=context_id,
+                    #         task_id=task_id,
+                    #     ),
+                    #     final=True,
+                    # )
+                    await task_updater.add_artifact(
+                            parts=[Part(root=TextPart(text=final_text))],
+                            artifact_id=artifact_id,
+                            metadata=None,
+                            append=streamed_any_delta,
+                            last_chunk=True
+                        )
+                    await task_updater.complete()
                 except Exception:  # pylint: disable=broad-except
                     logger.debug(
                         "Error sending fallback completed status", exc_info=True
@@ -704,6 +739,7 @@ async def handle_a2a_jsonrpc(  # pylint: disable=too-many-locals,too-many-statem
                         )
                         break
                     chunk_count += 1
+                    logger.debug("Chunk sent to A2A client: %s", str(chunk))
                     yield chunk
             finally:
                 # Ensure the app task is cleaned up
