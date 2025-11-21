@@ -324,6 +324,22 @@ async def retrieve_response(  # pylint: disable=too-many-locals,too-many-branche
                 f"\n\n[Attachment: {attachment.attachment_type}]\n{attachment.content}"
             )
 
+    # Create or use existing conversation
+    # If no conversation_id is provided, create a new conversation
+    conversation_id = query_request.conversation_id
+    if not conversation_id:
+        logger.debug("No conversation_id provided, creating new conversation")
+        try:
+            conversation = await client.conversations.create(metadata={})
+            conversation_id = conversation.id
+            logger.info("Created new conversation with ID: %s", conversation_id)
+        except Exception as e:  # pylint: disable=broad-exception-caught
+            logger.warning(
+                "Failed to create conversation: %s, proceeding without conversation_id",
+                e,
+            )
+            conversation_id = None
+
     # Create OpenAI response using responses API
     create_kwargs: dict[str, Any] = {
         "input": input_text,
@@ -333,8 +349,8 @@ async def retrieve_response(  # pylint: disable=too-many-locals,too-many-branche
         "stream": False,
         "store": True,
     }
-    if query_request.conversation_id:
-        create_kwargs["previous_response_id"] = query_request.conversation_id
+    if conversation_id:
+        create_kwargs["conversation"] = conversation_id
 
     # Add shields to extra_body if available
     if available_shields:
@@ -349,8 +365,12 @@ async def retrieve_response(  # pylint: disable=too-many-locals,too-many-branche
         len(response.output),
     )
 
-    # Return the response ID - client can use it for chaining if desired
-    conversation_id = response.id
+    # Use the conversation_id (either provided or newly created)
+    # The response.id is not used for conversation chaining when using Conversations API
+    if not conversation_id:
+        # Fallback to response.id if conversation creation failed
+        conversation_id = response.id
+        logger.debug("Using response.id as conversation_id: %s", conversation_id)
 
     # Process OpenAI response format
     llm_response = ""
