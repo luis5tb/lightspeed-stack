@@ -47,6 +47,7 @@ from utils.endpoints import (
     cleanup_after_streaming,
     get_system_prompt,
 )
+from utils.suid import normalize_conversation_id, to_llama_stack_conversation_id
 from utils.mcp_headers import mcp_headers_dependency
 from utils.shields import detect_shield_violations, get_available_shields
 from utils.token_counter import TokenCounter
@@ -152,26 +153,13 @@ def create_responses_response_generator(  # pylint: disable=too-many-locals,too-
             event_type = getattr(chunk, "type", None)
             logger.debug("Processing chunk %d, type: %s", chunk_id, event_type)
 
-            # Emit start event on first chunk if we have a conversation_id
-            if not start_event_emitted and conv_id:
+            # Emit start event on first chunk (conversation_id is always set at this point)
+            if not start_event_emitted:
                 yield stream_start_event(conv_id)
                 start_event_emitted = True
 
-            # Handle response.created event
+            # Handle response.created event (just skip, no need to extract conversation_id)
             if event_type == "response.created":
-                # If we don't have a conversation_id yet (fallback case), extract from response
-                if not conv_id:
-                    try:
-                        conv_id = getattr(chunk, "response").id
-                        logger.debug(
-                            "Using response.id as conversation_id: %s", conv_id
-                        )
-                    except Exception:  # pylint: disable=broad-except
-                        logger.warning("Missing response id!")
-                        conv_id = ""
-                    if conv_id and not start_event_emitted:
-                        yield stream_start_event(conv_id)
-                        start_event_emitted = True
                 continue
 
             # Text streaming
@@ -358,7 +346,7 @@ async def streaming_query_endpoint_handler_v2(  # pylint: disable=too-many-local
     )
 
 
-async def retrieve_response(
+async def retrieve_response(  # pylint: disable=too-many-locals
     client: AsyncLlamaStackClient,
     model_id: str,
     query_request: QueryRequest,
@@ -415,21 +403,29 @@ async def retrieve_response(
                 f"{attachment.content}"
             )
 
-    # Create or use existing conversation
-    # If no conversation_id is provided, create a new conversation
+    # Handle conversation ID for Responses API
+    # Create conversation upfront if not provided
     conversation_id = query_request.conversation_id
-    if not conversation_id:
+    if conversation_id:
+        # Conversation ID was provided - convert to llama-stack format
+        logger.debug("Using existing conversation ID: %s", conversation_id)
+        llama_stack_conv_id = to_llama_stack_conversation_id(conversation_id)
+    else:
+        # No conversation_id provided - create a new conversation first
         logger.debug("No conversation_id provided, creating new conversation")
         try:
             conversation = await client.conversations.create(metadata={})
-            conversation_id = conversation.id
-            logger.info("Created new conversation with ID: %s", conversation_id)
-        except Exception as e:  # pylint: disable=broad-exception-caught
-            logger.warning(
-                "Failed to create conversation: %s, proceeding without conversation_id",
-                e,
+            llama_stack_conv_id = conversation.id
+            # Store the normalized version for later use
+            conversation_id = normalize_conversation_id(llama_stack_conv_id)
+            logger.info(
+                "Created new conversation with ID: %s (normalized: %s)",
+                llama_stack_conv_id,
+                conversation_id,
             )
-            conversation_id = None
+        except Exception as e:  # pylint: disable=broad-exception-caught
+            logger.error("Failed to create conversation: %s", e)
+            raise
 
     create_params: dict[str, Any] = {
         "input": input_text,
@@ -438,9 +434,8 @@ async def retrieve_response(
         "stream": True,
         "store": True,
         "tools": toolgroups,
+        "conversation": llama_stack_conv_id,
     }
-    if conversation_id:
-        create_params["conversation"] = conversation_id
 
     # Add shields to extra_body if available
     if available_shields:
@@ -449,6 +444,6 @@ async def retrieve_response(
     response = await client.responses.create(**create_params)
     response_stream = cast(AsyncIterator[OpenAIResponseObjectStream], response)
 
-    # Return the conversation_id (either provided or newly created)
+    # Return the normalized conversation_id (already normalized above)
     # The response_generator will emit it in the start event
-    return response_stream, conversation_id or ""
+    return response_stream, conversation_id
