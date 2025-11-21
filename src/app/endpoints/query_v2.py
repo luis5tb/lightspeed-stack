@@ -33,6 +33,7 @@ from utils.endpoints import (
     get_system_prompt,
     get_topic_summary_system_prompt,
 )
+from utils.suid import to_llama_stack_conversation_id
 from utils.mcp_headers import mcp_headers_dependency
 from utils.shields import detect_shield_violations, get_available_shields
 from utils.token_counter import TokenCounter
@@ -396,7 +397,7 @@ async def retrieve_response(  # pylint: disable=too-many-locals,too-many-branche
         "store": True,
     }
     if conversation_id:
-        create_kwargs["conversation"] = conversation_id
+        create_kwargs["conversation"] = to_llama_stack_conversation_id(conversation_id)
 
     # Add shields to extra_body if available
     if available_shields:

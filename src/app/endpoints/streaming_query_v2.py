@@ -40,6 +40,7 @@ from utils.endpoints import (
     cleanup_after_streaming,
     get_system_prompt,
 )
+from utils.suid import to_llama_stack_conversation_id
 from utils.mcp_headers import mcp_headers_dependency
 from utils.shields import detect_shield_violations, get_available_shields
 from utils.token_counter import TokenCounter
@@ -438,7 +439,7 @@ async def retrieve_response(
         "tools": toolgroups,
     }
     if conversation_id:
-        create_params["conversation"] = conversation_id
+        create_params["conversation"] = to_llama_stack_conversation_id(conversation_id)
 
     # Add shields to extra_body if available
     if available_shields:

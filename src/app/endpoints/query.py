@@ -117,14 +117,25 @@ def persist_user_conversation_details(
     topic_summary: Optional[str],
 ) -> None:
     """Associate conversation to user in the database."""
+    from utils.suid import normalize_conversation_id
+
+    # Normalize the conversation ID (strip 'conv_' prefix if present)
+    normalized_id = normalize_conversation_id(conversation_id)
+    logger.debug(
+        "persist_user_conversation_details - original conv_id: %s, normalized: %s, user: %s",
+        conversation_id,
+        normalized_id,
+        user_id,
+    )
+
     with get_session() as session:
         existing_conversation = (
-            session.query(UserConversation).filter_by(id=conversation_id).first()
+            session.query(UserConversation).filter_by(id=normalized_id).first()
         )
 
         if not existing_conversation:
             conversation = UserConversation(
-                id=conversation_id,
+                id=normalized_id,
                 user_id=user_id,
                 last_used_model=model,
                 last_used_provider=provider_id,
@@ -132,16 +143,27 @@ def persist_user_conversation_details(
                 message_count=1,
             )
             session.add(conversation)
-            logger.debug(
-                "Associated conversation %s to user %s", conversation_id, user_id
+            logger.info(
+                "Creating new conversation in DB - ID: %s, User: %s",
+                normalized_id,
+                user_id,
             )
         else:
             existing_conversation.last_used_model = model
             existing_conversation.last_used_provider = provider_id
             existing_conversation.last_message_at = datetime.now(UTC)
             existing_conversation.message_count += 1
+            logger.debug(
+                "Updating existing conversation in DB - ID: %s, User: %s, Messages: %d",
+                normalized_id,
+                user_id,
+                existing_conversation.message_count,
+            )
 
         session.commit()
+        logger.debug(
+            "Successfully committed conversation %s to database", normalized_id
+        )
 
 
 def evaluate_model_hints(

@@ -32,7 +32,11 @@ from utils.endpoints import (
     delete_conversation,
     retrieve_conversation,
 )
-from utils.suid import check_suid
+from utils.suid import (
+    check_suid,
+    normalize_conversation_id,
+    to_llama_stack_conversation_id,
+)
 
 logger = logging.getLogger("app.endpoints.handlers")
 router = APIRouter(tags=["conversations_v3"])
@@ -282,9 +286,17 @@ async def get_conversation_endpoint_handler(
             ).dump_detail(),
         )
 
+    # Normalize the conversation ID for database operations (strip conv_ prefix if present)
+    normalized_conv_id = normalize_conversation_id(conversation_id)
+    logger.debug(
+        "GET conversation - original ID: %s, normalized ID: %s",
+        conversation_id,
+        normalized_conv_id,
+    )
+
     user_id = auth[0]
     if not can_access_conversation(
-        conversation_id,
+        normalized_conv_id,
         user_id,
         others_allowed=(
             Action.READ_OTHERS_CONVERSATIONS in request.state.authorized_actions
@@ -293,36 +305,50 @@ async def get_conversation_endpoint_handler(
         logger.warning(
             "User %s attempted to read conversation %s they don't have access to",
             user_id,
-            conversation_id,
+            normalized_conv_id,
         )
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
             detail=AccessDeniedResponse(
                 user_id=user_id,
                 resource="conversation",
-                resource_id=conversation_id,
+                resource_id=normalized_conv_id,
                 action="read",
             ).dump_detail(),
         )
 
     # If reached this, user is authorized to retrieve this conversation
-    conversation = retrieve_conversation(conversation_id)
+    # Note: We check if conversation exists in DB but don't fail if it doesn't,
+    # as it might exist in llama-stack but not be persisted yet
+    conversation = retrieve_conversation(normalized_conv_id)
     if conversation is None:
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail=NotFoundResponse(
-                resource="conversation", resource_id=conversation_id
-            ).dump_detail(),
+        logger.warning(
+            "Conversation %s not found in database, will try llama-stack",
+            normalized_conv_id,
         )
 
-    logger.info("Retrieving conversation %s using Conversations API", conversation_id)
+    logger.info(
+        "Retrieving conversation %s using Conversations API", normalized_conv_id
+    )
 
     try:
         client = AsyncLlamaStackClientHolder().get_client()
 
+        # Convert to llama-stack format (add 'conv_' prefix if needed)
+        llama_stack_conv_id = to_llama_stack_conversation_id(normalized_conv_id)
+        logger.debug(
+            "Calling llama-stack list_items with conversation_id: %s",
+            llama_stack_conv_id,
+        )
+
         # Use Conversations API to retrieve conversation items
-        conversation_items_response = await client.conversations.list_items(
-            conversation_id=conversation_id,
+        from llama_stack_client import NOT_GIVEN
+
+        conversation_items_response = await client.conversations.items.list(
+            conversation_id=llama_stack_conv_id,
+            after=NOT_GIVEN,  # No pagination cursor
+            include=NOT_GIVEN,  # Include all available data
+            limit=1000,  # Max items to retrieve
             order="asc",  # Get items in chronological order
         )
 
@@ -348,7 +374,7 @@ async def get_conversation_endpoint_handler(
         chat_history = simplify_conversation_items(items_dicts)
 
         return ConversationResponse(
-            conversation_id=conversation_id,
+            conversation_id=normalized_conv_id,
             chat_history=chat_history,
         )
 
@@ -366,7 +392,7 @@ async def get_conversation_endpoint_handler(
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
             detail=NotFoundResponse(
-                resource="conversation", resource_id=conversation_id
+                resource="conversation", resource_id=normalized_conv_id
             ).dump_detail(),
         ) from e
 
@@ -375,12 +401,12 @@ async def get_conversation_endpoint_handler(
 
     except Exception as e:
         # Handle case where conversation doesn't exist or other errors
-        logger.exception("Error retrieving conversation %s: %s", conversation_id, e)
+        logger.exception("Error retrieving conversation %s: %s", normalized_conv_id, e)
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail={
                 "response": "Unknown error",
-                "cause": f"Unknown error while getting conversation {conversation_id} : {str(e)}",
+                "cause": f"Unknown error while getting conversation {normalized_conv_id} : {str(e)}",
             },
         ) from e
 
@@ -421,9 +447,12 @@ async def delete_conversation_endpoint_handler(
             ).dump_detail(),
         )
 
+    # Normalize the conversation ID for database operations (strip conv_ prefix if present)
+    normalized_conv_id = normalize_conversation_id(conversation_id)
+
     user_id = auth[0]
     if not can_access_conversation(
-        conversation_id,
+        normalized_conv_id,
         user_id,
         others_allowed=(
             Action.DELETE_OTHERS_CONVERSATIONS in request.state.authorized_actions
@@ -432,46 +461,47 @@ async def delete_conversation_endpoint_handler(
         logger.warning(
             "User %s attempted to delete conversation %s they don't have access to",
             user_id,
-            conversation_id,
+            normalized_conv_id,
         )
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
             detail=AccessDeniedResponse(
                 user_id=user_id,
                 resource="conversation",
-                resource_id=conversation_id,
+                resource_id=normalized_conv_id,
                 action="delete",
             ).dump_detail(),
         )
 
     # If reached this, user is authorized to delete this conversation
-    conversation = retrieve_conversation(conversation_id)
+    conversation = retrieve_conversation(normalized_conv_id)
     if conversation is None:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
             detail=NotFoundResponse(
-                resource="conversation", resource_id=conversation_id
+                resource="conversation", resource_id=normalized_conv_id
             ).dump_detail(),
         )
 
-    logger.info("Deleting conversation %s using Conversations API", conversation_id)
+    logger.info("Deleting conversation %s using Conversations API", normalized_conv_id)
 
     try:
         # Get Llama Stack client
         client = AsyncLlamaStackClientHolder().get_client()
 
-        # Use Conversations API to delete the conversation
-        await client.conversations.openai_delete_conversation(
-            conversation_id=conversation_id
-        )
+        # Convert to llama-stack format (add 'conv_' prefix if needed)
+        llama_stack_conv_id = to_llama_stack_conversation_id(normalized_conv_id)
 
-        logger.info("Successfully deleted conversation %s", conversation_id)
+        # Use Conversations API to delete the conversation
+        await client.conversations.delete(conversation_id=llama_stack_conv_id)
+
+        logger.info("Successfully deleted conversation %s", normalized_conv_id)
 
         # Also delete from local database
-        delete_conversation(conversation_id=conversation_id)
+        delete_conversation(conversation_id=normalized_conv_id)
 
         return ConversationDeleteResponse(
-            conversation_id=conversation_id,
+            conversation_id=normalized_conv_id,
             success=True,
             response="Conversation deleted successfully",
         )
@@ -488,12 +518,12 @@ async def delete_conversation_endpoint_handler(
         # If not found in LlamaStack, still try to delete from local DB
         logger.warning(
             "Conversation %s not found in LlamaStack, cleaning up local DB",
-            conversation_id,
+            normalized_conv_id,
         )
-        delete_conversation(conversation_id=conversation_id)
+        delete_conversation(conversation_id=normalized_conv_id)
 
         return ConversationDeleteResponse(
-            conversation_id=conversation_id,
+            conversation_id=normalized_conv_id,
             success=True,
             response="Conversation deleted successfully",
         )
@@ -503,12 +533,12 @@ async def delete_conversation_endpoint_handler(
 
     except Exception as e:
         # Handle case where conversation doesn't exist or other errors
-        logger.exception("Error deleting conversation %s: %s", conversation_id, e)
+        logger.exception("Error deleting conversation %s: %s", normalized_conv_id, e)
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail={
                 "response": "Unknown error",
-                "cause": f"Unknown error while deleting conversation {conversation_id} : {str(e)}",
+                "cause": f"Unknown error while deleting conversation {normalized_conv_id} : {str(e)}",
             },
         ) from e
 
@@ -547,9 +577,12 @@ async def update_conversation_endpoint_handler(
             ).dump_detail(),
         )
 
+    # Normalize the conversation ID for database operations (strip conv_ prefix if present)
+    normalized_conv_id = normalize_conversation_id(conversation_id)
+
     user_id = auth[0]
     if not can_access_conversation(
-        conversation_id,
+        normalized_conv_id,
         user_id,
         others_allowed=(
             Action.QUERY_OTHERS_CONVERSATIONS in request.state.authorized_actions
@@ -558,66 +591,69 @@ async def update_conversation_endpoint_handler(
         logger.warning(
             "User %s attempted to update conversation %s they don't have access to",
             user_id,
-            conversation_id,
+            normalized_conv_id,
         )
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
             detail=AccessDeniedResponse(
                 user_id=user_id,
                 resource="conversation",
-                resource_id=conversation_id,
+                resource_id=normalized_conv_id,
                 action="update",
             ).dump_detail(),
         )
 
     # If reached this, user is authorized to update this conversation
-    conversation = retrieve_conversation(conversation_id)
+    conversation = retrieve_conversation(normalized_conv_id)
     if conversation is None:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
             detail=NotFoundResponse(
-                resource="conversation", resource_id=conversation_id
+                resource="conversation", resource_id=normalized_conv_id
             ).dump_detail(),
         )
 
     logger.info(
         "Updating metadata for conversation %s using Conversations API",
-        conversation_id,
+        normalized_conv_id,
     )
 
     try:
         # Get Llama Stack client
         client = AsyncLlamaStackClientHolder().get_client()
 
+        # Convert to llama-stack format (add 'conv_' prefix if needed)
+        llama_stack_conv_id = to_llama_stack_conversation_id(normalized_conv_id)
+
         # Prepare metadata with topic summary
         metadata = {"topic_summary": update_request.topic_summary}
 
         # Use Conversations API to update the conversation metadata
         await client.conversations.update_conversation(
-            conversation_id=conversation_id,
+            conversation_id=llama_stack_conv_id,
             metadata=metadata,
         )
 
         logger.info(
             "Successfully updated metadata for conversation %s in LlamaStack",
-            conversation_id,
+            normalized_conv_id,
         )
 
         # Also update in local database
         with get_session() as session:
             db_conversation = (
-                session.query(UserConversation).filter_by(id=conversation_id).first()
+                session.query(UserConversation).filter_by(id=normalized_conv_id).first()
             )
             if db_conversation:
                 db_conversation.topic_summary = update_request.topic_summary
                 session.commit()
                 logger.info(
                     "Successfully updated topic summary in local database for conversation %s",
-                    conversation_id,
+                    normalized_conv_id,
                 )
 
         return ConversationUpdateResponse(
-            conversation_id=conversation_id,
+            conversation_id=normalized_conv_id,
             success=True,
             message="Topic summary updated successfully",
         )
@@ -634,7 +670,7 @@ async def update_conversation_endpoint_handler(
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
             detail=NotFoundResponse(
-                resource="conversation", resource_id=conversation_id
+                resource="conversation", resource_id=normalized_conv_id
             ).dump_detail(),
         ) from e
 
@@ -643,11 +679,11 @@ async def update_conversation_endpoint_handler(
 
     except Exception as e:
         # Handle case where conversation doesn't exist or other errors
-        logger.exception("Error updating conversation %s: %s", conversation_id, e)
+        logger.exception("Error updating conversation %s: %s", normalized_conv_id, e)
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail={
                 "response": "Unknown error",
-                "cause": f"Unknown error while updating conversation {conversation_id} : {str(e)}",
+                "cause": f"Unknown error while updating conversation {normalized_conv_id} : {str(e)}",
             },
         ) from e
