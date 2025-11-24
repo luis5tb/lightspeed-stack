@@ -61,6 +61,12 @@ exclude = [
   # service/ols/src/auth/k8s.py and currently has 58 Pyright issues. It
   # might need to be rewritten down the line.
   "src/authentication/k8s.py",
+  # Agent API v1 endpoints - deprecated API but still supported
+  # Type errors due to llama-stack-client not exposing Agent API types
+  "src/app/endpoints/conversations.py",
+  "src/app/endpoints/query.py",
+  "src/app/endpoints/streaming_query.py",
+  "src/utils/endpoints.py",
 ]
 extraPaths = ["./src"]
 
