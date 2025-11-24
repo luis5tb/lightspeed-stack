@@ -444,6 +444,6 @@ async def retrieve_response(  # pylint: disable=too-many-locals
     response = await client.responses.create(**create_params)
     response_stream = cast(AsyncIterator[OpenAIResponseObjectStream], response)
 
-    # Return the normalized conversation_id 
+    # Return the normalized conversation_id
     # The response_generator will emit it in the start event
     return response_stream, normalize_conversation_id(conversation_id)

@@ -4,7 +4,7 @@ import logging
 from typing import Any
 
 from fastapi import APIRouter, Depends, HTTPException, Request, status
-from llama_stack_client import APIConnectionError, NotFoundError
+from llama_stack_client import APIConnectionError, NOT_GIVEN, NotFoundError
 
 from app.database import get_session
 from authentication import get_auth_dependency
@@ -15,13 +15,13 @@ from models.config import Action
 from models.database.conversations import UserConversation
 from models.requests import ConversationUpdateRequest
 from models.responses import (
-    AccessDeniedResponse,
     BadRequestResponse,
     ConversationDeleteResponse,
     ConversationDetails,
     ConversationResponse,
     ConversationsListResponse,
     ConversationUpdateResponse,
+    ForbiddenResponse,
     NotFoundResponse,
     ServiceUnavailableResponse,
     UnauthorizedResponse,
@@ -55,7 +55,7 @@ conversation_responses: dict[int | str, dict[str, Any]] = {
         "description": "Unauthorized: Invalid or missing Bearer token",
     },
     403: {
-        "model": AccessDeniedResponse,
+        "model": ForbiddenResponse,
         "description": "Client does not have permission to access conversation",
     },
     404: {
@@ -82,7 +82,7 @@ conversation_delete_responses: dict[int | str, dict[str, Any]] = {
         "description": "Unauthorized: Invalid or missing Bearer token",
     },
     403: {
-        "model": AccessDeniedResponse,
+        "model": ForbiddenResponse,
         "description": "Client does not have permission to access conversation",
     },
     404: {
@@ -124,7 +124,7 @@ conversation_update_responses: dict[int | str, dict[str, Any]] = {
         "description": "Unauthorized: Invalid or missing Bearer token",
     },
     403: {
-        "model": AccessDeniedResponse,
+        "model": ForbiddenResponse,
         "description": "Client does not have permission to access conversation",
     },
     404: {
@@ -283,7 +283,7 @@ async def get_conversation_endpoint_handler(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail=BadRequestResponse(
                 resource="conversation", resource_id=conversation_id
-            ).dump_detail(),
+            ).model_dump(),
         )
 
     # Normalize the conversation ID for database operations (strip conv_ prefix if present)
@@ -309,12 +309,11 @@ async def get_conversation_endpoint_handler(
         )
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
-            detail=AccessDeniedResponse(
-                user_id=user_id,
-                resource="conversation",
-                resource_id=normalized_conv_id,
+            detail=ForbiddenResponse.conversation(
                 action="read",
-            ).dump_detail(),
+                resource_id=normalized_conv_id,
+                user_id=user_id,
+            ).model_dump(),
         )
 
     # If reached this, user is authorized to retrieve this conversation
@@ -342,8 +341,6 @@ async def get_conversation_endpoint_handler(
         )
 
         # Use Conversations API to retrieve conversation items
-        from llama_stack_client import NOT_GIVEN
-
         conversation_items_response = await client.conversations.items.list(
             conversation_id=llama_stack_conv_id,
             after=NOT_GIVEN,  # No pagination cursor
@@ -384,7 +381,7 @@ async def get_conversation_endpoint_handler(
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
             detail=ServiceUnavailableResponse(
                 backend_name="Llama Stack", cause=str(e)
-            ).dump_detail(),
+            ).model_dump(),
         ) from e
 
     except NotFoundError as e:
@@ -393,7 +390,7 @@ async def get_conversation_endpoint_handler(
             status_code=status.HTTP_404_NOT_FOUND,
             detail=NotFoundResponse(
                 resource="conversation", resource_id=normalized_conv_id
-            ).dump_detail(),
+            ).model_dump(),
         ) from e
 
     except HTTPException:
@@ -402,11 +399,14 @@ async def get_conversation_endpoint_handler(
     except Exception as e:
         # Handle case where conversation doesn't exist or other errors
         logger.exception("Error retrieving conversation %s: %s", normalized_conv_id, e)
+        error_msg = (
+            f"Unknown error while getting conversation {normalized_conv_id} : {e}"
+        )
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail={
                 "response": "Unknown error",
-                "cause": f"Unknown error while getting conversation {normalized_conv_id} : {str(e)}",
+                "cause": error_msg,
             },
         ) from e
 
@@ -444,7 +444,7 @@ async def delete_conversation_endpoint_handler(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail=BadRequestResponse(
                 resource="conversation", resource_id=conversation_id
-            ).dump_detail(),
+            ).model_dump(),
         )
 
     # Normalize the conversation ID for database operations (strip conv_ prefix if present)
@@ -465,12 +465,11 @@ async def delete_conversation_endpoint_handler(
         )
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
-            detail=AccessDeniedResponse(
-                user_id=user_id,
-                resource="conversation",
-                resource_id=normalized_conv_id,
+            detail=ForbiddenResponse.conversation(
                 action="delete",
-            ).dump_detail(),
+                resource_id=normalized_conv_id,
+                user_id=user_id,
+            ).model_dump(),
         )
 
     # If reached this, user is authorized to delete this conversation
@@ -480,7 +479,7 @@ async def delete_conversation_endpoint_handler(
             status_code=status.HTTP_404_NOT_FOUND,
             detail=NotFoundResponse(
                 resource="conversation", resource_id=normalized_conv_id
-            ).dump_detail(),
+            ).model_dump(),
         )
 
     logger.info("Deleting conversation %s using Conversations API", normalized_conv_id)
@@ -502,8 +501,7 @@ async def delete_conversation_endpoint_handler(
 
         return ConversationDeleteResponse(
             conversation_id=normalized_conv_id,
-            success=True,
-            response="Conversation deleted successfully",
+            deleted=True,
         )
 
     except APIConnectionError as e:
@@ -511,7 +509,7 @@ async def delete_conversation_endpoint_handler(
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
             detail=ServiceUnavailableResponse(
                 backend_name="Llama Stack", cause=str(e)
-            ).dump_detail(),
+            ).model_dump(),
         ) from e
 
     except NotFoundError:
@@ -524,8 +522,7 @@ async def delete_conversation_endpoint_handler(
 
         return ConversationDeleteResponse(
             conversation_id=normalized_conv_id,
-            success=True,
-            response="Conversation deleted successfully",
+            deleted=True,
         )
 
     except HTTPException:
@@ -534,11 +531,14 @@ async def delete_conversation_endpoint_handler(
     except Exception as e:
         # Handle case where conversation doesn't exist or other errors
         logger.exception("Error deleting conversation %s: %s", normalized_conv_id, e)
+        error_msg = (
+            f"Unknown error while deleting conversation {normalized_conv_id} : {e}"
+        )
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail={
                 "response": "Unknown error",
-                "cause": f"Unknown error while deleting conversation {normalized_conv_id} : {str(e)}",
+                "cause": error_msg,
             },
         ) from e
 
@@ -574,7 +574,7 @@ async def update_conversation_endpoint_handler(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail=BadRequestResponse(
                 resource="conversation", resource_id=conversation_id
-            ).dump_detail(),
+            ).model_dump(),
         )
 
     # Normalize the conversation ID for database operations (strip conv_ prefix if present)
@@ -595,12 +595,11 @@ async def update_conversation_endpoint_handler(
         )
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
-            detail=AccessDeniedResponse(
-                user_id=user_id,
-                resource="conversation",
-                resource_id=normalized_conv_id,
+            detail=ForbiddenResponse.conversation(
                 action="update",
-            ).dump_detail(),
+                resource_id=normalized_conv_id,
+                user_id=user_id,
+            ).model_dump(),
         )
 
     # If reached this, user is authorized to update this conversation
@@ -610,7 +609,7 @@ async def update_conversation_endpoint_handler(
             status_code=status.HTTP_404_NOT_FOUND,
             detail=NotFoundResponse(
                 resource="conversation", resource_id=normalized_conv_id
-            ).dump_detail(),
+            ).model_dump(),
         )
 
     logger.info(
@@ -629,7 +628,7 @@ async def update_conversation_endpoint_handler(
         metadata = {"topic_summary": update_request.topic_summary}
 
         # Use Conversations API to update the conversation metadata
-        await client.conversations.update_conversation(
+        await client.conversations.update(
             conversation_id=llama_stack_conv_id,
             metadata=metadata,
         )
@@ -663,7 +662,7 @@ async def update_conversation_endpoint_handler(
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
             detail=ServiceUnavailableResponse(
                 backend_name="Llama Stack", cause=str(e)
-            ).dump_detail(),
+            ).model_dump(),
         ) from e
 
     except NotFoundError as e:
@@ -671,7 +670,7 @@ async def update_conversation_endpoint_handler(
             status_code=status.HTTP_404_NOT_FOUND,
             detail=NotFoundResponse(
                 resource="conversation", resource_id=normalized_conv_id
-            ).dump_detail(),
+            ).model_dump(),
         ) from e
 
     except HTTPException:
@@ -680,10 +679,13 @@ async def update_conversation_endpoint_handler(
     except Exception as e:
         # Handle case where conversation doesn't exist or other errors
         logger.exception("Error updating conversation %s: %s", normalized_conv_id, e)
+        error_msg = (
+            f"Unknown error while updating conversation {normalized_conv_id} : {e}"
+        )
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail={
                 "response": "Unknown error",
-                "cause": f"Unknown error while updating conversation {normalized_conv_id} : {str(e)}",
+                "cause": error_msg,
             },
         ) from e
