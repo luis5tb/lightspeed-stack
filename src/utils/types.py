@@ -3,8 +3,10 @@
 from typing import Any, Optional
 import json
 from llama_stack_client.lib.agents.tool_parser import ToolParser
-from llama_stack_client.types.shared.completion_message import CompletionMessage
-from llama_stack_client.types.shared.tool_call import ToolCall
+from llama_stack_client.lib.agents.types import (
+    CompletionMessage as AgentCompletionMessage,
+    ToolCall as AgentToolCall,
+)
 from llama_stack_client.types.shared.interleaved_content_item import (
     TextContentItem,
     ImageContentItem,
@@ -58,16 +60,18 @@ class Singleton(type):
 class GraniteToolParser(ToolParser):
     """Workaround for 'tool_calls' with granite models."""
 
-    def get_tool_calls(self, output_message: CompletionMessage) -> list[ToolCall]:
+    def get_tool_calls(
+        self, output_message: AgentCompletionMessage
+    ) -> list[AgentToolCall]:
         """
         Return the `tool_calls` list from a CompletionMessage, or an empty list if none are present.
 
         Parameters:
-            output_message (CompletionMessage | None): Completion
+            output_message (AgentCompletionMessage | None): Completion
             message potentially containing `tool_calls`.
 
         Returns:
-            list[ToolCall]: The list of tool call entries
+            list[AgentToolCall]: The list of tool call entries
             extracted from `output_message`, or an empty list.
         """
         if output_message and output_message.tool_calls:
