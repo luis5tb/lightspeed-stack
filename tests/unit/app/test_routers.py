@@ -7,7 +7,6 @@ from fastapi import FastAPI
 from app.routers import include_routers  # noqa:E402
 
 from app.endpoints import (
-    conversations,
     conversations_v2,
     conversations_v3,
     root,
@@ -16,12 +15,10 @@ from app.endpoints import (
     shields,
     rags,
     providers,
-    query,
     query_v2,
     health,
     config,
     feedback,
-    streaming_query,
     streaming_query_v2,
     authorized,
     metrics,
@@ -75,15 +72,15 @@ def test_include_routers() -> None:
     assert tools.router in app.get_routers()
     assert shields.router in app.get_routers()
     assert providers.router in app.get_routers()
-    #assert query.router in app.get_routers()
+    # assert query.router in app.get_routers()
     assert query_v2.router in app.get_routers()
-    #assert streaming_query.router in app.get_routers()
+    # assert streaming_query.router in app.get_routers()
     assert streaming_query_v2.router in app.get_routers()
     assert config.router in app.get_routers()
     assert feedback.router in app.get_routers()
     assert health.router in app.get_routers()
     assert authorized.router in app.get_routers()
-    #assert conversations.router in app.get_routers()
+    # assert conversations.router in app.get_routers()
     assert conversations_v2.router in app.get_routers()
     assert conversations_v3.router in app.get_routers()
     assert metrics.router in app.get_routers()
@@ -103,15 +100,15 @@ def test_check_prefixes() -> None:
     assert app.get_router_prefix(shields.router) == "/v1"
     assert app.get_router_prefix(providers.router) == "/v1"
     assert app.get_router_prefix(rags.router) == "/v1"
-    #assert app.get_router_prefix(query.router) == "/v1"
-    #assert app.get_router_prefix(streaming_query.router) == "/v1"
+    # assert app.get_router_prefix(query.router) == "/v1"
+    # assert app.get_router_prefix(streaming_query.router) == "/v1"
     assert app.get_router_prefix(query_v2.router) == "/v1"
     assert app.get_router_prefix(streaming_query_v2.router) == "/v1"
     assert app.get_router_prefix(config.router) == "/v1"
     assert app.get_router_prefix(feedback.router) == "/v1"
     assert app.get_router_prefix(health.router) == ""
     assert app.get_router_prefix(authorized.router) == ""
-    #assert app.get_router_prefix(conversations.router) == "/v1"
+    # assert app.get_router_prefix(conversations.router) == "/v1"
     assert app.get_router_prefix(conversations_v2.router) == "/v2"
     assert app.get_router_prefix(conversations_v3.router) == "/v1"
     assert app.get_router_prefix(metrics.router) == ""

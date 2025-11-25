@@ -4,8 +4,15 @@ import logging
 from typing import Any, cast
 
 from fastapi import APIRouter, Depends, HTTPException, Request, status
-from llama_stack_client import APIConnectionError, NOT_GIVEN, BadRequestError, NotFoundError
-from llama_stack_client.types.conversation_delete_response import ConversationDeleteResponse as CDR
+from llama_stack_client import (
+    APIConnectionError,
+    NOT_GIVEN,
+    BadRequestError,
+    NotFoundError,
+)
+from llama_stack_client.types.conversation_delete_response import (
+    ConversationDeleteResponse as CDR,
+)
 from sqlalchemy.exc import SQLAlchemyError
 
 from app.database import get_session
@@ -198,7 +205,7 @@ async def get_conversations_list_endpoint_handler(
             )
 
             return ConversationsListResponse(conversations=conversations)
-            
+
         except SQLAlchemyError as e:
             logger.exception(
                 "Error retrieving conversations for user %s: %s", user_id, e
@@ -238,8 +245,7 @@ async def get_conversation_endpoint_handler(
     if not check_suid(conversation_id):
         logger.error("Invalid conversation ID format: %s", conversation_id)
         response = BadRequestResponse(
-            resource="conversation",
-            resource_id=conversation_id
+            resource="conversation", resource_id=conversation_id
         ).model_dump()
         raise HTTPException(**response)
 
@@ -384,11 +390,10 @@ async def delete_conversation_endpoint_handler(
     if not check_suid(conversation_id):
         logger.error("Invalid conversation ID format: %s", conversation_id)
         response = BadRequestResponse(
-            resource="conversation",
-            resource_id=conversation_id
+            resource="conversation", resource_id=conversation_id
         ).model_dump()
         raise HTTPException(**response)
-        
+
     # Normalize the conversation ID for database operations (strip conv_ prefix if present)
     normalized_conv_id = normalize_conversation_id(conversation_id)
 
@@ -441,8 +446,9 @@ async def delete_conversation_endpoint_handler(
         llama_stack_conv_id = to_llama_stack_conversation_id(normalized_conv_id)
 
         # Use Conversations API to delete the conversation
-        delete_response = cast(CDR, await client.conversations.delete(
-            conversation_id=llama_stack_conv_id))
+        delete_response = cast(
+            CDR, await client.conversations.delete(conversation_id=llama_stack_conv_id)
+        )
 
         logger.info("Successfully deleted conversation %s", normalized_conv_id)
 
@@ -472,7 +478,7 @@ async def delete_conversation_endpoint_handler(
             conversation_id=normalized_conv_id,
             deleted=deleted,
         )
-    
+
     except SQLAlchemyError as e:
         logger.error(
             "Database error occurred while deleting conversation %s.",
@@ -509,7 +515,9 @@ async def update_conversation_endpoint_handler(
     # Validate conversation ID format
     if not check_suid(conversation_id):
         logger.error("Invalid conversation ID format: %s", conversation_id)
-        response = BadRequestResponse(resource="conversation", resource_id=conversation_id).model_dump()
+        response = BadRequestResponse(
+            resource="conversation", resource_id=conversation_id
+        ).model_dump()
         raise HTTPException(**response)
 
     # Normalize the conversation ID for database operations (strip conv_ prefix if present)
@@ -529,9 +537,7 @@ async def update_conversation_endpoint_handler(
             normalized_conv_id,
         )
         response = ForbiddenResponse.conversation(
-            action="update", 
-            resource_id=normalized_conv_id, 
-            user_id=user_id
+            action="update", resource_id=normalized_conv_id, user_id=user_id
         ).model_dump()
         raise HTTPException(**response)
 
@@ -609,7 +615,7 @@ async def update_conversation_endpoint_handler(
             resource="conversation", resource_id=normalized_conv_id
         ).model_dump()
         raise HTTPException(**response) from e
-    
+
     except SQLAlchemyError as e:
         logger.error(
             "Database error occurred while updating conversation %s.",
