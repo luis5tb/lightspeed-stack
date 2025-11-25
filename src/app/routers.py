@@ -56,5 +56,5 @@ def include_routers(app: FastAPI) -> None:
     app.include_router(authorized.router)
     app.include_router(metrics.router)
 
-    # A2A (Agent-to-Agent) protocol endpoints
+    # A2A (Agent-to-Agent) protocol endpoint
     app.include_router(a2a.router)

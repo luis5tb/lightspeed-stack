@@ -1,13 +1,16 @@
-"""Handler for A2A (Agent-to-Agent) protocol endpoints."""
+"""Handler for A2A (Agent-to-Agent) protocol endpoints using Responses API."""
 
 import asyncio
 import json
 import logging
 import uuid
-from datetime import datetime
-from typing import Annotated, Any
+from datetime import datetime, timezone
+from typing import Annotated, Any, AsyncIterator, MutableMapping
 
-from fastapi import APIRouter, Depends, Request
+from fastapi import APIRouter, Depends, HTTPException, Request, status
+from llama_stack.apis.agents.openai_responses import (
+    OpenAIResponseObjectStream,
+)
 from starlette.responses import Response, StreamingResponse
 
 from a2a.types import (
@@ -15,9 +18,13 @@ from a2a.types import (
     AgentSkill,
     AgentProvider,
     AgentCapabilities,
+    Artifact,
+    Message,
     Part,
-    Task,
+    TaskArtifactUpdateEvent,
     TaskState,
+    TaskStatus,
+    TaskStatusUpdateEvent,
     TextPart,
 )
 from a2a.server.agent_execution import AgentExecutor, RequestContext
@@ -38,9 +45,10 @@ from app.endpoints.query import (
     select_model_and_provider_id,
     evaluate_model_hints,
 )
-from app.endpoints.streaming_query import retrieve_response
+from app.endpoints.streaming_query_v2 import retrieve_response
 from client import AsyncLlamaStackClientHolder
 from utils.mcp_headers import mcp_headers_dependency
+from utils.responses import extract_text_from_response_output_item
 from version import __version__
 
 logger = logging.getLogger("app.endpoints.handlers")
@@ -60,313 +68,406 @@ _TASK_STORE = InMemoryTaskStore()
 _CONTEXT_TO_CONVERSATION: dict[str, str] = {}
 
 
+def _convert_responses_content_to_a2a_parts(output: list[Any]) -> list[Part]:
+    """Convert Responses API output to A2A Parts.
+
+    Args:
+        output: List of Responses API output items
+
+    Returns:
+        List of A2A Part objects
+    """
+    parts: list[Part] = []
+
+    for output_item in output:
+        text = extract_text_from_response_output_item(output_item)
+        if text:
+            parts.append(Part(root=TextPart(text=text)))
+
+    return parts
+
+
+class TaskResultAggregator:
+    """Aggregates the task status updates and provides the final task state."""
+
+    def __init__(self) -> None:
+        """Initialize the task result aggregator with default state."""
+        self._task_state: TaskState = TaskState.working
+        self._task_status_message: Message | None = None
+
+    def process_event(
+        self, event: TaskStatusUpdateEvent | TaskArtifactUpdateEvent | Any
+    ) -> None:
+        """
+        Process an event from the agent run and detect signals about the task status.
+
+        Priority of task state (highest to lowest):
+        - failed
+        - auth_required
+        - input_required
+        - working
+
+        Args:
+            event: The event to process
+        """
+        if isinstance(event, TaskStatusUpdateEvent):
+            if event.status.state == TaskState.failed:
+                self._task_state = TaskState.failed
+                self._task_status_message = event.status.message
+            elif (
+                event.status.state == TaskState.auth_required
+                and self._task_state != TaskState.failed
+            ):
+                self._task_state = TaskState.auth_required
+                self._task_status_message = event.status.message
+            elif (
+                event.status.state == TaskState.input_required
+                and self._task_state not in (TaskState.failed, TaskState.auth_required)
+            ):
+                self._task_state = TaskState.input_required
+                self._task_status_message = event.status.message
+            elif self._task_state == TaskState.working:
+                # Keep tracking the working message/status
+                self._task_status_message = event.status.message
+
+            # Ensure the stream always sees "working" state for intermediate updates
+            # unless it's already terminal in the event flow (which we control via
+            # generator). This prevents premature terminationby clients listening to the stream.
+            if not event.final:
+                event.status.state = TaskState.working
+
+    @property
+    def task_state(self) -> TaskState:
+        """Return the current task state."""
+        return self._task_state
+
+    @property
+    def task_status_message(self) -> Message | None:
+        """Return the current task status message."""
+        return self._task_status_message
+
+
 # -----------------------------
 # Agent Executor Implementation
 # -----------------------------
-class LightspeedAgentExecutor(AgentExecutor):
-    """
-    Lightspeed Agent Executor for OpenShift Assisted Chat Installer.
+class A2AAgentExecutor(AgentExecutor):
+    """Agent Executor for A2A using Llama Stack Responses API.
 
     This executor implements the A2A AgentExecutor interface and handles
-    routing queries to the appropriate LLM backend.
+    routing queries to the LLM backend using the Responses API.
     """
 
     def __init__(
         self, auth_token: str, mcp_headers: dict[str, dict[str, str]] | None = None
     ):
-        """
-        Initialize the Lightspeed agent executor.
+        """Initialize the A2A agent executor.
 
         Args:
             auth_token: Authentication token for the request
             mcp_headers: MCP headers for context propagation
         """
-        self.auth_token = auth_token
-        self.mcp_headers = mcp_headers or {}
+        self.auth_token: str = auth_token
+        self.mcp_headers: dict[str, dict[str, str]] = mcp_headers or {}
 
     async def execute(
         self,
         context: RequestContext,
         event_queue: EventQueue,
     ) -> None:
-        """
-        Execute the agent with the given context and send results to the event queue.
+        """Execute the agent with the given context and send results to the event queue.
 
         Args:
             context: The request context containing user input and metadata
             event_queue: Queue for sending response events
         """
-        # Get or create task
-        task = await self._prepare_task(context, event_queue)
+        if not context.message:
+            raise ValueError("A2A request must have a message")
 
-        # Process the task with streaming
-        await self._process_task_streaming(
-            context, event_queue, task.context_id, task.id
-        )
-
-    async def _prepare_task(
-        self, context: RequestContext, event_queue: EventQueue
-    ) -> Task:
-        """
-        Get existing task or create a new one.
-
-        Args:
-            context: The request context
-            event_queue: Queue for sending events
-
-        Returns:
-            Task object
-        """
-        task = context.current_task
-        if not task:
-            if not context.message:
-                raise ValueError("No message provided in context")
+        task_id = context.task_id or ""
+        context_id = context.context_id or ""
+        # for new task, create a task submitted event
+        if not context.current_task:
+            # Set context_id on message so new_task preserves it
+            if context_id and context.message:
+                logger.debug(
+                    "Setting context_id %s on message for A2A contextId %s",
+                    context_id,
+                    context.message.message_id,
+                )
+                context.message.context_id = context_id
             task = new_task(context.message)
             await event_queue.enqueue_event(task)
-        return task
+            task_id = task.id
+            context_id = task.context_id
+        task_updater = TaskUpdater(event_queue, task_id, context_id)
 
-    async def _process_task_streaming(  # pylint: disable=too-many-locals,too-many-branches,too-many-statements
+        # Process the task with streaming
+        try:
+            await self._process_task_streaming(
+                context, task_updater, task_id, context_id
+            )
+        except Exception as e:  # pylint: disable=broad-exception-caught
+            logger.error("Error handling A2A request: %s", e, exc_info=True)
+            try:
+                await task_updater.update_status(
+                    TaskState.failed,
+                    message=new_agent_text_message(str(e)),
+                    final=True,
+                )
+            except Exception as enqueue_error:  # pylint: disable=broad-exception-caught
+                logger.error(
+                    "Failed to publish failure event: %s", enqueue_error, exc_info=True
+                )
+
+    async def _process_task_streaming(  # pylint: disable=too-many-locals
         self,
         context: RequestContext,
-        event_queue: EventQueue,
-        context_id: str,
+        task_updater: TaskUpdater,
         task_id: str,
+        context_id: str,
     ) -> None:
-        """
-        Process the task with streaming updates.
+        """Process the task with streaming updates using Responses API.
 
         Args:
             context: The request context
-            event_queue: Queue for sending events
-            context_id: Context ID for the task
-            task_id: Task ID
+            task_updater: Task updater for sending events
+            task_id: The task ID to use for this execution
+            context_id: The context ID to use for this execution
         """
-        task_updater = TaskUpdater(event_queue, task_id, context_id)
+        if not task_id or not context_id:
+            raise ValueError("Task ID and Context ID are required")
 
-        try:
-            # Extract user input using SDK utility
-            user_input = context.get_user_input()
-            if not user_input:
-                await task_updater.update_status(
-                    TaskState.input_required,
-                    message=new_agent_text_message(
-                        "I didn't receive any input. "
-                        "How can I help you with OpenShift installation?",
-                        context_id=context_id,
-                        task_id=task_id,
-                    ),
-                    final=True,
-                )
-                return
-
-            preview = user_input[:200] + ("..." if len(user_input) > 200 else "")
-            logger.info("Processing A2A request: %s", preview)
-
-            # Extract routing metadata from context
-            metadata = context.message.metadata if context.message else {}
-            model = metadata.get("model") if metadata else None
-            provider = metadata.get("provider") if metadata else None
-
-            # Resolve conversation_id from A2A contextId to preserve multi-turn history
-            a2a_context_id = context_id
-            conversation_id_hint = _CONTEXT_TO_CONVERSATION.get(a2a_context_id)
-            logger.info(
-                "A2A contextId %s maps to conversation_id %s",
-                a2a_context_id,
-                conversation_id_hint,
-            )
-
-            # Build internal query request with conversation_id for history
-            query_request = QueryRequest(
-                query=user_input,
-                conversation_id=conversation_id_hint,
-                model=model,
-                provider=provider,
-            )
-
-            # Get LLM client and select model
-            client = AsyncLlamaStackClientHolder().get_client()
-            llama_stack_model_id, _model_id, _provider_id = (
-                select_model_and_provider_id(
-                    await client.models.list(),
-                    *evaluate_model_hints(
-                        user_conversation=None, query_request=query_request
-                    ),
-                )
-            )
-
-            # Stream response from LLM with status updates
-            stream, conversation_id = await retrieve_response(
-                client,
-                llama_stack_model_id,
-                query_request,
-                self.auth_token,
-                mcp_headers=self.mcp_headers,
-            )
-
-            # Persist conversationId for next turn in same A2A context
-            if conversation_id:
-                _CONTEXT_TO_CONVERSATION[a2a_context_id] = conversation_id
-                logger.info(
-                    "Persisted conversation_id %s for A2A contextId %s",
-                    conversation_id,
-                    a2a_context_id,
-                )
-
-            # Stream incremental updates: emit working status with text deltas.
-            # Terminal conditions:
-            #   - turn_awaiting_input -> TaskState.input_required with accumulated text
-            #   - turn_complete -> TaskState.completed (final), leverage contextId for follow-ups
-            final_event_sent = False
-            accumulated_text_chunks: list[str] = []
-            streamed_any_delta = False
-
-            artifact_id = str(uuid.uuid4())
-            async for chunk in stream:
-                # Extract text from chunk - llama-stack structure
-                if hasattr(chunk, "event") and chunk.event is not None:
-                    payload = chunk.event.payload
-                    event_type = payload.event_type
-
-                    # Handle turn_awaiting_input - request more input with accumulated text
-                    if event_type == "turn_awaiting_input":
-                        logger.debug("Turn awaiting input")
-                        try:
-                            final_text = (
-                                ""
-                                if streamed_any_delta
-                                else "".join(accumulated_text_chunks)
-                            )
-                            await task_updater.update_status(
-                                TaskState.input_required,
-                                message=new_agent_text_message(
-                                    final_text,
-                                    context_id=context_id,
-                                    task_id=task_id,
-                                ),
-                                final=True,
-                            )
-                            final_event_sent = True
-                            logger.info("Input required for task %s", task_id)
-                        except Exception:  # pylint: disable=broad-except
-                            logger.debug(
-                                "Error sending input_required status", exc_info=True
-                            )
-                            # End the stream for this turn after requesting input
-                            break
-
-                    # Handle turn_complete - complete the task for this turn
-                    elif event_type == "turn_complete":
-                        logger.debug("Turn complete event")
-                        try:
-                            final_text = (
-                                ""
-                                if streamed_any_delta
-                                else "".join(accumulated_text_chunks)
-                            )
-                            # await task_updater.update_status(
-                            #     TaskState.completed,
-                            #     message=new_agent_text_message(
-                            #         final_text,
-                            #         context_id=context_id,
-                            #         task_id=task_id,
-                            #     ),
-                            #     final=True,
-                            # )
-                            task_metadata = {
-                                "conversation_id": str(conversation_id),
-                                "message_id": str(chunk.event.payload.turn.turn_id),
-                                "sources": None
-                            }
-
-                            await task_updater.add_artifact(
-                                parts=[Part(root=TextPart(text=final_text))],
-                                artifact_id=artifact_id,
-                                metadata=task_metadata,
-                                append=streamed_any_delta,
-                                last_chunk=True
-                            )
-                            await task_updater.complete()
-                            final_event_sent = True
-                        except Exception:  # pylint: disable=broad-except
-                            logger.debug(
-                                "Error sending completed on turn_complete",
-                                exc_info=True,
-                            )
-                        logger.info("Turn completed for task %s", task_id)
-                        # End the stream for this turn
-                        break
-
-                    # Handle streaming inference tokens
-                    elif event_type == "step_progress":
-                        if hasattr(payload, "delta") and payload.delta.type == "text":
-                            delta_text = payload.delta.text
-                            if delta_text:
-                                accumulated_text_chunks.append(delta_text)
-                                logger.debug("Step progress, delta test: %s", delta_text)
-                                # await task_updater.update_status(
-                                #     TaskState.working,
-                                #     message=new_agent_text_message(
-                                #         delta_text,
-                                #         context_id=context_id,
-                                #         task_id=task_id,
-                                #     ),
-                                # )
-                                await task_updater.add_artifact(
-                                    parts=[Part(root=TextPart(text=delta_text))],
-                                    artifact_id=artifact_id,
-                                    metadata=None,
-                                    append=streamed_any_delta,
-                                )
-                                streamed_any_delta = True
-
-            # Ensure exactly one terminal status per turn
-            if not final_event_sent:
-                try:
-                    final_text = (
-                        "" if streamed_any_delta else "".join(accumulated_text_chunks)
-                    )
-                    # await task_updater.update_status(
-                    #     TaskState.completed,
-                    #     message=new_agent_text_message(
-                    #         final_text,
-                    #         context_id=context_id,
-                    #         task_id=task_id,
-                    #     ),
-                    #     final=True,
-                    # )
-                    await task_updater.add_artifact(
-                            parts=[Part(root=TextPart(text=final_text))],
-                            artifact_id=artifact_id,
-                            metadata=None,
-                            append=streamed_any_delta,
-                            last_chunk=True
-                        )
-                    await task_updater.complete()
-                except Exception:  # pylint: disable=broad-except
-                    logger.debug(
-                        "Error sending fallback completed status", exc_info=True
-                    )
-
-        except Exception as exc:  # pylint: disable=broad-except
-            logger.error("Error executing agent: %s", str(exc), exc_info=True)
+        # Extract user input using SDK utility
+        user_input = context.get_user_input()
+        if not user_input:
             await task_updater.update_status(
-                TaskState.failed,
+                TaskState.input_required,
                 message=new_agent_text_message(
-                    f"Sorry, I encountered an error: {str(exc)}",
+                    "No input received. Please provide your input.",
                     context_id=context_id,
                     task_id=task_id,
                 ),
                 final=True,
             )
+            return
+
+        preview = user_input[:200] + ("..." if len(user_input) > 200 else "")
+        logger.info("Processing A2A request: %s", preview)
+
+        # Extract routing metadata from context
+        metadata = context.message.metadata if context.message else {}
+        model = metadata.get("model") if metadata else None
+        provider = metadata.get("provider") if metadata else None
+
+        # Resolve conversation_id from A2A contextId for multi-turn
+        a2a_context_id = context_id
+        conversation_id = _CONTEXT_TO_CONVERSATION.get(a2a_context_id)
+        logger.info(
+            "A2A contextId %s maps to conversation_id %s",
+            a2a_context_id,
+            conversation_id,
+        )
+
+        # Build internal query request (conversation_id may be None for first turn)
+        query_request = QueryRequest(
+            query=user_input,
+            conversation_id=conversation_id,
+            model=model,
+            provider=provider,
+            system_prompt=None,
+            attachments=None,
+            no_tools=False,
+            generate_topic_summary=True,
+            media_type=None,
+        )
+
+        # Get LLM client and select model
+        client = AsyncLlamaStackClientHolder().get_client()
+        llama_stack_model_id, _model_id, _provider_id = select_model_and_provider_id(
+            await client.models.list(),
+            *evaluate_model_hints(user_conversation=None, query_request=query_request),
+        )
+
+        # Stream response from LLM using the Responses API
+        stream, conversation_id = await retrieve_response(
+            client,
+            llama_stack_model_id,
+            query_request,
+            self.auth_token,
+            mcp_headers=self.mcp_headers,
+        )
+
+        # Persist conversation_id for next turn in same A2A context
+        if conversation_id:
+            _CONTEXT_TO_CONVERSATION[a2a_context_id] = conversation_id
+            logger.info(
+                "Persisted conversation_id %s for A2A contextId %s",
+                conversation_id,
+                a2a_context_id,
+            )
+
+        # Initialize result aggregator
+        aggregator = TaskResultAggregator()
+        event_queue = task_updater.event_queue
+
+        # Emit working status with metadata before processing stream
+        await event_queue.enqueue_event(
+            TaskStatusUpdateEvent(
+                task_id=task_id,
+                status=TaskStatus(
+                    state=TaskState.working,
+                    timestamp=datetime.now(timezone.utc).isoformat(),
+                ),
+                context_id=context_id,
+                final=False,
+                metadata={
+                    "model": llama_stack_model_id,
+                    "conversation_id": conversation_id,
+                },
+            )
+        )
+
+        # Process stream using generator and aggregator pattern
+        async for a2a_event in self._convert_stream_to_events(
+            stream, task_id, context_id, conversation_id
+        ):
+            aggregator.process_event(a2a_event)
+            await event_queue.enqueue_event(a2a_event)
+
+        # Publish the final task result event
+        if aggregator.task_state == TaskState.working:
+            await task_updater.update_status(
+                TaskState.completed,
+                timestamp=datetime.now(timezone.utc).isoformat(),
+                final=True,
+            )
+        else:
+            await task_updater.update_status(
+                aggregator.task_state,
+                message=aggregator.task_status_message,
+                timestamp=datetime.now(timezone.utc).isoformat(),
+                final=True,
+            )
+
+    async def _convert_stream_to_events(  # pylint: disable=too-many-branches,too-many-locals
+        self,
+        stream: AsyncIterator[OpenAIResponseObjectStream],
+        task_id: str,
+        context_id: str,
+        conversation_id: str | None,
+    ) -> AsyncIterator[Any]:
+        """Convert Responses API stream chunks to A2A events.
+
+        Args:
+            stream: The Responses API response stream
+            task_id: The task ID for this execution
+            context_id: The context ID for this execution
+            conversation_id: The conversation ID for this A2A context
+
+        Yields:
+            A2A events (TaskStatusUpdateEvent or TaskArtifactUpdateEvent)
+        """
+        if not task_id or not context_id:
+            raise ValueError("Task ID and Context ID are required")
+
+        artifact_id = str(uuid.uuid4())
+        text_parts: list[str] = []
+
+        async for chunk in stream:
+            event_type = getattr(chunk, "type", None)
+
+            # Skip response.created - conversation is already created
+            if event_type == "response.created":
+                continue
+
+            # Text streaming - emit as working status with text delta
+            if event_type == "response.output_text.delta":
+                delta = getattr(chunk, "delta", "")
+                if delta:
+                    text_parts.append(delta)
+                    yield TaskStatusUpdateEvent(
+                        task_id=task_id,
+                        status=TaskStatus(
+                            state=TaskState.working,
+                            message=new_agent_text_message(
+                                delta,
+                                context_id=context_id,
+                                task_id=task_id,
+                            ),
+                            timestamp=datetime.now(timezone.utc).isoformat(),
+                        ),
+                        context_id=context_id,
+                        final=False,
+                    )
+
+            # Tool call events
+            elif event_type == "response.function_call_arguments.done":
+                item_id = getattr(chunk, "item_id", "")
+                yield TaskStatusUpdateEvent(
+                    task_id=task_id,
+                    status=TaskStatus(
+                        state=TaskState.working,
+                        message=new_agent_text_message(
+                            f"Tool call: {item_id}",
+                            context_id=context_id,
+                            task_id=task_id,
+                        ),
+                        timestamp=datetime.now(timezone.utc).isoformat(),
+                    ),
+                    context_id=context_id,
+                    final=False,
+                )
+
+            # MCP call completion
+            elif event_type == "response.mcp_call.arguments.done":
+                item_id = getattr(chunk, "item_id", "")
+                yield TaskStatusUpdateEvent(
+                    task_id=task_id,
+                    status=TaskStatus(
+                        state=TaskState.working,
+                        message=new_agent_text_message(
+                            f"MCP call: {item_id}",
+                            context_id=context_id,
+                            task_id=task_id,
+                        ),
+                        timestamp=datetime.now(timezone.utc).isoformat(),
+                    ),
+                    context_id=context_id,
+                    final=False,
+                )
+
+            # Response completed - emit final artifact
+            elif event_type == "response.completed":
+                response_obj = getattr(chunk, "response", None)
+                final_text = "".join(text_parts)
+
+                if response_obj:
+                    output = getattr(response_obj, "output", [])
+                    a2a_parts = _convert_responses_content_to_a2a_parts(output)
+                    if not a2a_parts and final_text:
+                        a2a_parts = [Part(root=TextPart(text=final_text))]
+                else:
+                    a2a_parts = (
+                        [Part(root=TextPart(text=final_text))] if final_text else []
+                    )
+
+                yield TaskArtifactUpdateEvent(
+                    task_id=task_id,
+                    last_chunk=True,
+                    context_id=context_id,
+                    artifact=Artifact(
+                        artifact_id=artifact_id,
+                        parts=a2a_parts,
+                        metadata={"conversation_id": str(conversation_id or "")},
+                    ),
+                )
 
     async def cancel(
         self,
         context: RequestContext,  # pylint: disable=unused-argument
         event_queue: EventQueue,  # pylint: disable=unused-argument
     ) -> None:
-        """
-        Handle task cancellation.
+        """Handle task cancellation.
 
         Args:
             context: The request context
@@ -394,155 +495,71 @@ def get_lightspeed_agent_card() -> AgentCard:
     """
     # Get base URL from configuration or construct it
     service_config = configuration.service_configuration
-    base_url = service_config.base_url if service_config.base_url is not None else "http://localhost:8080"
+    base_url = (
+        service_config.base_url
+        if service_config.base_url is not None
+        else "http://localhost:8080"
+    )
 
-    # Check if agent card is configured via file
-    if (
-        configuration.customization is not None
-        and configuration.customization.agent_card_config is not None
-    ):
-        config = configuration.customization.agent_card_config
-
-        # Parse skills from config
-        skills = [
-            AgentSkill(
-                id=skill.get("id"),
-                name=skill.get("name"),
-                description=skill.get("description"),
-                tags=skill.get("tags", []),
-                input_modes=skill.get("inputModes", []),
-                output_modes=skill.get("outputModes", []),
-                examples=skill.get("examples", []),
-            )
-            for skill in config.get("skills", [])
-        ]
-
-        # Parse provider from config
-        provider_config = config.get("provider", {})
-        provider = AgentProvider(
-            organization=provider_config.get("organization", ""),
-            url=provider_config.get("url", ""),
+    if not configuration.customization:
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Customization configuration not found",
         )
 
-        # Parse capabilities from config
-        capabilities_config = config.get("capabilities", {})
-        capabilities = AgentCapabilities(
-            streaming=capabilities_config.get("streaming", True),
-            push_notifications=capabilities_config.get("pushNotifications", False),
-            state_transition_history=capabilities_config.get(
-                "stateTransitionHistory", False
-            ),
+    if not configuration.customization.agent_card_config:
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Agent card configuration not found",
         )
 
-        return AgentCard(
-            name=config.get("name", "Lightspeed AI Assistant"),
-            description=config.get("description", ""),
-            version=__version__,
-            url=f"{base_url}/a2a",
-            documentation_url=f"{base_url}/docs",
-            provider=provider,
-            skills=skills,
-            default_input_modes=config.get("defaultInputModes", ["text/plain"]),
-            default_output_modes=config.get("defaultOutputModes", ["text/plain"]),
-            capabilities=capabilities,
-            protocol_version="0.2.1",
-            security=config.get("security", [{"bearer": []}]),
-            security_schemes=config.get("security_schemes", {}),
-        )
+    config = configuration.customization.agent_card_config
 
-    # Fallback to default hardcoded agent card
-    logger.info("Using default hardcoded agent card (no agent_card_path configured)")
-
-    # Define Lightspeed's skills for OpenShift cluster installation
+    # Parse skills from config
     skills = [
         AgentSkill(
-            id="cluster_installation_guidance",
-            name="Cluster Installation Guidance",
-            description=(
-                "Provide guidance and assistance for OpenShift cluster "
-                "installation using assisted-installer"
-            ),
-            tags=["openshift", "installation", "assisted-installer"],
-            input_modes=["text/plain", "application/json"],
-            output_modes=["text/plain", "application/json"],
-            examples=[
-                "How do I install OpenShift using assisted-installer?",
-                "What are the prerequisites for OpenShift installation?",
-            ],
-        ),
-        AgentSkill(
-            id="cluster_configuration_validation",
-            name="Cluster Configuration Validation",
-            description=(
-                "Validate and provide recommendations for OpenShift "
-                "cluster configuration parameters"
-            ),
-            tags=["openshift", "configuration", "validation"],
-            input_modes=["application/json", "text/plain"],
-            output_modes=["application/json", "text/plain"],
-            examples=[
-                "Validate my cluster configuration",
-                "Check if my OpenShift setup meets requirements",
-            ],
-        ),
-        AgentSkill(
-            id="installation_troubleshooting",
-            name="Installation Troubleshooting",
-            description=(
-                "Help troubleshoot OpenShift cluster installation issues "
-                "and provide solutions"
-            ),
-            tags=["openshift", "troubleshooting", "support"],
-            input_modes=["text/plain", "application/json"],
-            output_modes=["text/plain", "application/json"],
-            examples=[
-                "My cluster installation is failing",
-                "How do I fix installation errors?",
-            ],
-        ),
-        AgentSkill(
-            id="cluster_requirements_analysis",
-            name="Cluster Requirements Analysis",
-            description=(
-                "Analyze infrastructure requirements for "
-                "OpenShift cluster deployment"
-            ),
-            tags=["openshift", "requirements", "planning"],
-            input_modes=["application/json", "text/plain"],
-            output_modes=["application/json", "text/plain"],
-            examples=[
-                "What hardware do I need for OpenShift?",
-                "Analyze requirements for a 5-node cluster",
-            ],
-        ),
+            id=skill.get("id"),
+            name=skill.get("name"),
+            description=skill.get("description"),
+            tags=skill.get("tags", []),
+            input_modes=skill.get("inputModes", []),
+            output_modes=skill.get("outputModes", []),
+            examples=skill.get("examples", []),
+        )
+        for skill in config.get("skills", [])
     ]
 
-    # Provider information
-    provider = AgentProvider(organization="Red Hat", url="https://redhat.com")
+    # Parse provider from config
+    provider_config = config.get("provider", {})
+    provider = AgentProvider(
+        organization=provider_config.get("organization", ""),
+        url=provider_config.get("url", ""),
+    )
 
-    # Agent capabilities
+    # Parse capabilities from config
+    capabilities_config = config.get("capabilities", {})
     capabilities = AgentCapabilities(
-        streaming=True, push_notifications=False, state_transition_history=False
+        streaming=capabilities_config.get("streaming", True),
+        push_notifications=capabilities_config.get("pushNotifications", False),
+        state_transition_history=capabilities_config.get(
+            "stateTransitionHistory", False
+        ),
     )
 
     return AgentCard(
-        name="OpenShift Assisted Installer AI Assistant",
-        description=(
-            "AI-powered assistant specialized in OpenShift cluster "
-            "installation, configuration, and troubleshooting using "
-            "assisted-installer backend"
-        ),
+        name=config.get("name", "Lightspeed AI Assistant"),
+        description=config.get("description", ""),
         version=__version__,
         url=f"{base_url}/a2a",
         documentation_url=f"{base_url}/docs",
         provider=provider,
         skills=skills,
-        default_input_modes=["text/plain"],
-        default_output_modes=["text/plain"],
+        default_input_modes=config.get("defaultInputModes", ["text/plain"]),
+        default_output_modes=config.get("defaultOutputModes", ["text/plain"]),
         capabilities=capabilities,
         protocol_version="0.2.1",
-        security=[{"bearer": []}],
-        security_schemes={},
+        security=config.get("security", [{"bearer": []}]),
+        security_schemes=config.get("security_schemes", {}),
     )
 
 
@@ -577,8 +594,7 @@ async def get_agent_card(  # pylint: disable=unused-argument
 
 
 def _create_a2a_app(auth_token: str, mcp_headers: dict[str, dict[str, str]]) -> Any:
-    """
-    Create an A2A Starlette application instance with auth context.
+    """Create an A2A Starlette application instance with auth context.
 
     Args:
         auth_token: Authentication token for the request
@@ -587,9 +603,7 @@ def _create_a2a_app(auth_token: str, mcp_headers: dict[str, dict[str, str]]) -> 
     Returns:
         A2A Starlette ASGI application
     """
-    agent_executor = LightspeedAgentExecutor(
-        auth_token=auth_token, mcp_headers=mcp_headers
-    )
+    agent_executor = A2AAgentExecutor(auth_token=auth_token, mcp_headers=mcp_headers)
 
     request_handler = DefaultRequestHandler(
         agent_executor=agent_executor,
@@ -612,7 +626,7 @@ async def handle_a2a_jsonrpc(  # pylint: disable=too-many-locals,too-many-statem
     mcp_headers: dict[str, dict[str, str]] = Depends(mcp_headers_dependency),
 ) -> Response | StreamingResponse:
     """
-    Main A2A JSON-RPC endpoint following the A2A protocol specification.
+    Handle A2A JSON-RPC requests following the A2A protocol specification.
 
     This endpoint uses the DefaultRequestHandler from the A2A SDK to handle
     all JSON-RPC requests including message/send, message/stream, etc.
@@ -670,13 +684,13 @@ async def handle_a2a_jsonrpc(  # pylint: disable=too-many-locals,too-many-statem
         logger.error("Error detecting streaming request: %s", str(e))
 
     # Setup scope for A2A app
-    scope = request.scope.copy()
+    scope = dict(request.scope)
     scope["path"] = "/"  # A2A app expects root path
 
     # We need to re-provide the body since we already read it
     body_sent = False
 
-    async def receive():
+    async def receive() -> MutableMapping[str, Any]:
         nonlocal body_sent
         if not body_sent:
             body_sent = True
@@ -720,8 +734,8 @@ async def handle_a2a_jsonrpc(  # pylint: disable=too-many-locals,too-many-statem
         # Start the A2A app task
         app_task = asyncio.create_task(run_a2a_app())
 
-        async def response_generator() -> Any:
-            """Generator that yields chunks from the queue."""
+        async def response_generator() -> AsyncIterator[bytes]:
+            """Generate chunks from the queue for streaming response."""
             chunk_count = 0
             try:
                 while True:

@@ -33,16 +33,16 @@ The A2A protocol is an open standard for agent-to-agent communication that allow
 │                          │                                      │
 │                          ▼                                      │
 │  ┌──────────────────────────────────────────────────────────┐   │
-│  │              LightspeedAgentExecutor                     │   │
+│  │                 A2AAgentExecutor                         │   │
 │  │  - Handles task execution                                │   │
-│  │  - Converts Llama Stack events to A2A events             │   │
+│  │  - Converts Responses API events to A2A events           │   │
 │  │  - Manages multi-turn conversations                      │   │
 │  └──────────────────────────────────────────────────────────┘   │
 │                          │                                      │
 │                          ▼                                      │
 │  ┌──────────────────────────────────────────────────────────┐   │
 │  │                  Llama Stack Client                      │   │
-│  │  - Agent API (streaming turns)                           │   │
+│  │  - Responses API (streaming responses)                   │   │
 │  │  - Tools, Shields, RAG integration                       │   │
 │  └──────────────────────────────────────────────────────────┘   │
 └─────────────────────────────────────────────────────────────────┘
@@ -64,17 +64,6 @@ The A2A protocol is an open standard for agent-to-agent communication that allow
 | `/a2a` | POST | Main JSON-RPC endpoint for A2A protocol |
 | `/a2a` | GET | Agent card retrieval via GET |
 | `/a2a/health` | GET | Health check endpoint |
-
-### Responses API Variant (Optional)
-
-If you want to use the Responses API backend instead of the Agent API:
-
-| Endpoint | Method | Description |
-|----------|--------|-------------|
-| `/responses/.well-known/agent.json` | GET | Agent card for Responses API backend |
-| `/responses/.well-known/agent-card.json` | GET | Agent card (alternate path) |
-| `/responses/a2a` | POST | JSON-RPC endpoint using Responses API |
-| `/responses/a2a/health` | GET | Health check endpoint |
 
 ## Configuration
 
@@ -199,14 +188,14 @@ The agent card describes the agent's capabilities:
 
 ## How the Executor Works
 
-### LightspeedAgentExecutor
+### A2AAgentExecutor
 
-The `LightspeedAgentExecutor` class implements the A2A `AgentExecutor` interface:
+The `A2AAgentExecutor` class implements the A2A `AgentExecutor` interface:
 
 1. **Receives A2A Request**: Extracts user input from the A2A message
 2. **Creates Query Request**: Builds an internal `QueryRequest` with conversation context
-3. **Calls Llama Stack**: Uses the Agent API to get streaming responses
-4. **Converts Events**: Transforms Llama Stack streaming chunks to A2A events
+3. **Calls Llama Stack**: Uses the Responses API to get streaming responses
+4. **Converts Events**: Transforms Responses API streaming chunks to A2A events
 5. **Manages State**: Tracks task state and publishes status updates
 
 ### Event Flow
@@ -227,7 +216,7 @@ A2A Request
     ▼
 ┌─────────────────────┐
 │ Call Llama Stack    │──► TaskStatusUpdateEvent (working)
-│ Agent API           │
+│ Responses API       │
 └─────────────────────┘
     │
     ▼
@@ -238,7 +227,7 @@ A2A Request
     │
     ▼
 ┌─────────────────────┐
-│ Turn Complete       │──► TaskArtifactUpdateEvent (final content)
+│ Response Complete   │──► TaskArtifactUpdateEvent (final content)
 └─────────────────────┘
     │
     ▼
@@ -404,15 +393,17 @@ curl -X POST http://localhost:8090/a2a \
     "params": {
       "message": {
         "messageId": "msg-002",
+        "contextId": "previous-context-id-here",
         "role": "user",
         "parts": [
           {"type": "text", "text": "How do I create one?"}
         ]
-      },
-      "contextId": "previous-context-id-here"
+      }
     }
   }'
 ```
+
+> **Important:** The `contextId` must be placed inside the `message` object, not at the `params` level. This is required by the A2A protocol specification for the server to correctly identify and continue the conversation.
 
 ### Example: Python Client
 
