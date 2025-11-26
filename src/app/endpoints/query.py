@@ -760,7 +760,7 @@ async def retrieve_response(  # pylint: disable=too-many-locals,too-many-branche
             ),
         }
 
-        vector_store_ids = [                                                                                                  
+        vector_store_ids = [
             vector_store.id for vector_store in (await client.vector_stores.list()).data
         ]
         toolgroups = (get_rag_toolgroups(vector_store_ids) or []) + [
