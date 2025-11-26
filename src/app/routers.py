@@ -25,6 +25,7 @@ from app.endpoints import (
     query_v2,
     # A2A (Agent-to-Agent) protocol support
     a2a,
+    responses_a2a,
 )
 
 
@@ -61,3 +62,4 @@ def include_routers(app: FastAPI) -> None:
 
     # A2A (Agent-to-Agent) protocol endpoints
     app.include_router(a2a.router)
+    app.include_router(responses_a2a.router)
