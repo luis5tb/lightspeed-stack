@@ -38,6 +38,7 @@ from models.responses import (
     ForbiddenResponse,
     InternalServerErrorResponse,
     NotFoundResponse,
+    PromptTooLongResponse,
     QuotaExceededResponse,
     ServiceUnavailableResponse,
     StreamingQueryResponse,
@@ -70,6 +71,7 @@ streaming_query_v2_responses: dict[int | str, dict[str, Any]] = {
     404: NotFoundResponse.openapi_response(
         examples=["conversation", "model", "provider"]
     ),
+    413: PromptTooLongResponse.openapi_response(),
     422: UnprocessableEntityResponse.openapi_response(),
     429: QuotaExceededResponse.openapi_response(),
     500: InternalServerErrorResponse.openapi_response(examples=["configuration"]),
@@ -108,7 +110,9 @@ def create_responses_response_generator(  # pylint: disable=too-many-locals,too-
         complete response for transcript storage if enabled.
         """
         chunk_id = 0
-        summary = TurnSummary(llm_response="", tool_calls=[])
+        summary = TurnSummary(
+            llm_response="", tool_calls=[], tool_results=[], rag_chunks=[]
+        )
 
         # Determine media type for response formatting
         media_type = context.query_request.media_type or MEDIA_TYPE_JSON
@@ -216,8 +220,10 @@ def create_responses_response_generator(  # pylint: disable=too-many-locals,too-
                     ToolCallSummary(
                         id=meta.get("call_id", item_id or "unknown"),
                         name=meta.get("name", "tool_call"),
-                        args=arguments,
-                        response=None,
+                        args=(
+                            arguments if isinstance(arguments, dict) else {}
+                        ),  # Handle non-dict arguments
+                        type="tool_call",
                     )
                 )
 

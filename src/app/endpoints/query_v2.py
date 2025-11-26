@@ -1,6 +1,7 @@
+# pylint: disable=too-many-locals,too-many-branches,too-many-nested-blocks
+
 """Handler for REST API call to provide answer to query using Response API."""
 
-import json
 import logging
 from typing import Annotated, Any, cast
 
@@ -24,6 +25,7 @@ from models.config import Action
 from models.requests import QueryRequest
 from models.responses import (
     ForbiddenResponse,
+    PromptTooLongResponse,
     InternalServerErrorResponse,
     NotFoundResponse,
     QueryResponse,
@@ -62,6 +64,7 @@ query_v2_response: dict[int | str, dict[str, Any]] = {
     404: NotFoundResponse.openapi_response(
         examples=["conversation", "model", "provider"]
     ),
+    413: PromptTooLongResponse.openapi_response(),
     422: UnprocessableEntityResponse.openapi_response(),
     429: QuotaExceededResponse.openapi_response(),
     500: InternalServerErrorResponse.openapi_response(examples=["configuration"]),
@@ -99,7 +102,7 @@ def _build_tool_call_summary(  # pylint: disable=too-many-return-statements,too-
             id=str(call_id),
             name=getattr(output_item, "name", "function_call"),
             args=args,
-            response=None,
+            type="tool_call",
         )
 
     if item_type == "file_search_call":
@@ -108,36 +111,38 @@ def _build_tool_call_summary(  # pylint: disable=too-many-return-statements,too-
             "status": getattr(output_item, "status", None),
         }
         results = getattr(output_item, "results", None)
-        response_payload: Any | None = None
+        # response_payload: Any | None = None
         if results is not None:
             # Store only the essential result metadata to avoid large payloads
-            response_payload = {
-                "results": [
-                    {
-                        "file_id": (
-                            getattr(result, "file_id", None)
-                            if not isinstance(result, dict)
-                            else result.get("file_id")
-                        ),
-                        "filename": (
-                            getattr(result, "filename", None)
-                            if not isinstance(result, dict)
-                            else result.get("filename")
-                        ),
-                        "score": (
-                            getattr(result, "score", None)
-                            if not isinstance(result, dict)
-                            else result.get("score")
-                        ),
-                    }
-                    for result in results
-                ]
-            }
+            # response_payload = {
+            #     "results": [
+            #         {
+            #             "file_id": (
+            #                 getattr(result, "file_id", None)
+            #                 if not isinstance(result, dict)
+            #                 else result.get("file_id")
+            #             ),
+            #             "filename": (
+            #                 getattr(result, "filename", None)
+            #                 if not isinstance(result, dict)
+            #                 else result.get("filename")
+            #             ),
+            #             "score": (
+            #                 getattr(result, "score", None)
+            #                 if not isinstance(result, dict)
+            #                 else result.get("score")
+            #             ),
+            #         }
+            #         for result in results
+            #     ]
+            # }
+            ...  # Handle response_payload
         return ToolCallSummary(
             id=str(getattr(output_item, "id")),
             name=DEFAULT_RAG_TOOL,
             args=args,
-            response=json.dumps(response_payload) if response_payload else None,
+            # response=json.dumps(response_payload) if response_payload else None,
+            type="tool_call",
         )
 
     if item_type == "web_search_call":
@@ -146,7 +151,7 @@ def _build_tool_call_summary(  # pylint: disable=too-many-return-statements,too-
             id=str(getattr(output_item, "id")),
             name="web_search",
             args=args,
-            response=None,
+            type="tool_call",
         )
 
     if item_type == "mcp_call":
@@ -163,7 +168,8 @@ def _build_tool_call_summary(  # pylint: disable=too-many-return-statements,too-
             id=str(getattr(output_item, "id")),
             name=getattr(output_item, "name", "mcp_call"),
             args=args,
-            response=getattr(output_item, "output", None),
+            # response=getattr(output_item, "output", None),
+            type="tool_call",
         )
 
     if item_type == "mcp_list_tools":
@@ -181,7 +187,8 @@ def _build_tool_call_summary(  # pylint: disable=too-many-return-statements,too-
             id=str(getattr(output_item, "id")),
             name="mcp_list_tools",
             args=args,
-            response=None,
+            # response=None,
+            type="tool_call",
         )
 
     if item_type == "mcp_approval_request":
@@ -194,7 +201,8 @@ def _build_tool_call_summary(  # pylint: disable=too-many-return-statements,too-
             id=str(getattr(output_item, "id")),
             name=getattr(output_item, "name", "mcp_approval_request"),
             args=args,
-            response=None,
+            # response=None,
+            type="tool_call",
         )
 
     return None
@@ -403,6 +411,8 @@ async def retrieve_response(  # pylint: disable=too-many-locals,too-many-branche
     summary = TurnSummary(
         llm_response=llm_response,
         tool_calls=tool_calls,
+        tool_results=[],
+        rag_chunks=[],
     )
 
     # Extract referenced documents and token usage from Responses API response

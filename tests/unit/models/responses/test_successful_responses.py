@@ -40,9 +40,9 @@ from models.responses import (
     ShieldsResponse,
     StatusResponse,
     StreamingQueryResponse,
-    ToolCall,
     ToolsResponse,
 )
+from utils.types import ToolCallSummary
 
 
 class TestModelsResponse:
@@ -281,7 +281,7 @@ class TestQueryResponse:
         """Test QueryResponse with all fields."""
         rag_chunks = [RAGChunk(content="chunk1", source="doc1", score=0.9)]
         tool_calls = [
-            ToolCall(tool_name="tool1", arguments={"arg": "value"}, result=None)
+            ToolCallSummary(id="call-1", name="tool1", args={"arg": "value"}, type="tool_call")
         ]
         referenced_docs = [
             ReferencedDocument(doc_url=AnyUrl("https://example.com"), doc_title="Doc")

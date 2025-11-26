@@ -48,12 +48,11 @@ def delete_conversation(conversation_id: str) -> bool:
             session.commit()
             logger.info("Deleted conversation %s from local database", conversation_id)
             return True
-        else:
-            logger.info(
-                "Conversation %s not found in local database, it may have already been deleted",
-                conversation_id,
-            )
-            return False
+        logger.info(
+            "Conversation %s not found in local database, it may have already been deleted",
+            conversation_id,
+        )
+        return False
 
 
 def retrieve_conversation(conversation_id: str) -> UserConversation | None:
@@ -258,7 +257,7 @@ def store_conversation_into_cache(
             )
 
 
-# # pylint: disable=R0913,R0917
+# # pylint: disable=R0913,R0917,unused-argument
 async def get_agent(
     client: AsyncLlamaStackClient,
     model_id: str,
@@ -349,7 +348,6 @@ async def get_agent(
             raise HTTPException(**response.model_dump()) from e
     else:
         # conversation_id = agent.agent_id
-        ...
         # pylint: enable=unexpected-keyword-arg,no-member
         logger.debug("New conversation ID: %s", conversation_id)
         session_id = await agent.create_session(get_suid())

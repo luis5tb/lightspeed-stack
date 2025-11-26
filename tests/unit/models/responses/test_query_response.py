@@ -1,6 +1,7 @@
 """Unit tests for QueryResponse model."""
 
-from models.responses import QueryResponse, RAGChunk, ToolCall, ReferencedDocument
+from models.responses import QueryResponse, ReferencedDocument
+from utils.types import RAGChunk, ToolCallSummary, ToolResultSummary
 
 
 class TestQueryResponse:
@@ -90,10 +91,20 @@ class TestQueryResponse:
         ]
 
         tool_calls = [
-            ToolCall(
-                tool_name="knowledge_search",
-                arguments={"query": "operator lifecycle manager"},
-                result={"chunks_found": 5},
+            ToolCallSummary(
+                id="call-1",
+                name="knowledge_search",
+                args={"query": "operator lifecycle manager"},
+                type="tool_call",
+            )
+        ]
+        tool_results = [
+            ToolResultSummary(
+                id="call-1",
+                status="success",
+                content={"chunks_found": 5},
+                type="tool_result",
+                round=1,
             )
         ]
 
@@ -111,6 +122,7 @@ class TestQueryResponse:
             response="Operator Lifecycle Manager (OLM) helps users install...",
             rag_chunks=rag_chunks,
             tool_calls=tool_calls,
+            tool_results=tool_results,
             referenced_documents=referenced_documents,
         )
 

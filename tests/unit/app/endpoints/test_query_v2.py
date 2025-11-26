@@ -1,4 +1,4 @@
-# pylint: disable=redefined-outer-name, import-error
+# pylint: disable=redefined-outer-name, import-error,too-many-locals
 """Unit tests for the /query (v2) REST API endpoint using Responses API."""
 
 from typing import Any

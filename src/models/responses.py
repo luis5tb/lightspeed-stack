@@ -10,6 +10,7 @@ from pydantic_core import SchemaError
 
 from quota.quota_exceed_error import QuotaExceedError
 from models.config import Action, Configuration
+from utils.types import ToolCallSummary, ToolResultSummary, RAGChunk
 
 SUCCESSFUL_RESPONSE_DESCRIPTION = "Successful response"
 BAD_REQUEST_DESCRIPTION = "Invalid request format"
@@ -20,23 +21,23 @@ UNPROCESSABLE_CONTENT_DESCRIPTION = "Request validation failed"
 INVALID_FEEDBACK_PATH_DESCRIPTION = "Invalid feedback storage path"
 SERVICE_UNAVAILABLE_DESCRIPTION = "Service unavailable"
 QUOTA_EXCEEDED_DESCRIPTION = "Quota limit exceeded"
+PROMPT_TOO_LONG_DESCRIPTION = "Prompt is too long"
 INTERNAL_SERVER_ERROR_DESCRIPTION = "Internal server error"
 
 
-class RAGChunk(BaseModel):
-    """Model representing a RAG chunk used in the response."""
+# class ToolCall(BaseModel):
+#     """Model representing a tool call made during response generation."""
 
-    content: str = Field(description="The content of the chunk")
-    source: str | None = Field(None, description="Source document or URL")
-    score: float | None = Field(None, description="Relevance score")
+#     tool_name: str = Field(description="Name of the tool called")
+#     arguments: dict[str, Any] = Field(description="Arguments passed to the tool")
+#     result: dict[str, Any] | None = Field(None, description="Result from the tool")
 
 
-class ToolCall(BaseModel):
-    """Model representing a tool call made during response generation."""
+# class ToolResult(BaseModel):
+#     """Model representing a tool result."""
 
-    tool_name: str = Field(description="Name of the tool called")
-    arguments: dict[str, Any] = Field(description="Arguments passed to the tool")
-    result: dict[str, Any] | None = Field(None, description="Result from the tool")
+#     tool_name: str = Field(description="Name of the tool")
+#     result: dict[str, Any] = Field(description="Result from the tool")
 
 
 class AbstractSuccessfulResponse(BaseModel):
@@ -370,9 +371,14 @@ class QueryResponse(AbstractSuccessfulResponse):
         description="List of RAG chunks used to generate the response",
     )
 
-    tool_calls: list[ToolCall] | None = Field(
+    tool_calls: list[ToolCallSummary] | None = Field(
         None,
         description="List of tool calls made during response generation",
+    )
+
+    tool_results: list[ToolResultSummary] | None = Field(
+        None,
+        description="List of tool results",
     )
 
     referenced_documents: list[ReferencedDocument] = Field(
@@ -1482,6 +1488,38 @@ class NotFoundResponse(AbstractErrorResponse):
         cause = f"{resource.title()} with ID {resource_id} does not exist"
         super().__init__(
             response=response, cause=cause, status_code=status.HTTP_404_NOT_FOUND
+        )
+
+
+class PromptTooLongResponse(AbstractErrorResponse):
+    """413 Payload Too Large - Prompt is too long."""
+
+    description: ClassVar[str] = PROMPT_TOO_LONG_DESCRIPTION
+    model_config = {
+        "json_schema_extra": {
+            "examples": [
+                {
+                    "label": "prompt too long",
+                    "detail": {
+                        "response": "Prompt is too long",
+                        "cause": "The prompt exceeds the maximum allowed length.",
+                    },
+                },
+            ]
+        }
+    }
+
+    def __init__(self, *, response: str = "Prompt is too long", cause: str):
+        """Initialize a PromptTooLongResponse.
+
+        Args:
+            response: Short summary of the error. Defaults to "Prompt is too long".
+            cause: Detailed explanation of what caused the error.
+        """
+        super().__init__(
+            response=response,
+            cause=cause,
+            status_code=status.HTTP_413_REQUEST_ENTITY_TOO_LARGE,
         )
 
 

@@ -8,7 +8,6 @@ from datetime import UTC, datetime
 from typing import Annotated, Any, Optional, cast
 
 from fastapi import APIRouter, Depends, HTTPException, Request
-from litellm.exceptions import RateLimitError
 from llama_stack_client import (
     APIConnectionError,
     AsyncLlamaStackClient,  # type: ignore
@@ -42,10 +41,10 @@ from models.responses import (
     InternalServerErrorResponse,
     NotFoundResponse,
     QueryResponse,
+    PromptTooLongResponse,
     QuotaExceededResponse,
     ReferencedDocument,
     ServiceUnavailableResponse,
-    ToolCall,
     UnauthorizedResponse,
     UnprocessableEntityResponse,
 )
@@ -84,6 +83,7 @@ query_response: dict[int | str, dict[str, Any]] = {
     404: NotFoundResponse.openapi_response(
         examples=["model", "conversation", "provider"]
     ),
+    413: PromptTooLongResponse.openapi_response(),
     422: UnprocessableEntityResponse.openapi_response(),
     429: QuotaExceededResponse.openapi_response(),
     500: InternalServerErrorResponse.openapi_response(examples=["configuration"]),
@@ -379,20 +379,6 @@ async def query_endpoint_handler_base(  # pylint: disable=R0914
 
         # Convert tool calls to response format
         logger.info("Processing tool calls...")
-        tool_calls = [
-            ToolCall(
-                tool_name=tc.name,
-                arguments=(
-                    tc.args if isinstance(tc.args, dict) else {"query": str(tc.args)}
-                ),
-                result=(
-                    {"response": tc.response}
-                    if tc.response and tc.name != constants.DEFAULT_RAG_TOOL
-                    else None
-                ),
-            )
-            for tc in summary.tool_calls
-        ]
 
         logger.info("Using referenced documents from response...")
 
@@ -403,7 +389,8 @@ async def query_endpoint_handler_base(  # pylint: disable=R0914
             conversation_id=conversation_id,
             response=summary.llm_response,
             rag_chunks=summary.rag_chunks if summary.rag_chunks else [],
-            tool_calls=tool_calls if tool_calls else None,
+            tool_calls=summary.tool_calls if summary.tool_calls else None,
+            tool_results=summary.tool_results if summary.tool_results else None,
             referenced_documents=referenced_documents,
             truncated=False,  # TODO: implement truncation detection
             input_tokens=token_usage.input_tokens,
@@ -427,7 +414,7 @@ async def query_endpoint_handler_base(  # pylint: disable=R0914
         logger.exception("Error persisting conversation details: %s", e)
         response = InternalServerErrorResponse.database_error()
         raise HTTPException(**response.model_dump()) from e
-    except RateLimitError as e:
+    except Exception as e:
         used_model = getattr(e, "model", "")
         response = QuotaExceededResponse.model(used_model)
         raise HTTPException(**response.model_dump()) from e
@@ -743,14 +730,14 @@ async def retrieve_response(  # pylint: disable=too-many-locals,too-many-branche
             toolgroups = None
 
     # TODO: LCORE-881 - Remove if Llama Stack starts to support these mime types
-    documents: list[Document] = [
-        (
-            {"content": doc["content"], "mime_type": "text/plain"}
-            if doc["mime_type"].lower() in ("application/json", "application/xml")
-            else doc
-        )
-        for doc in query_request.get_documents()
-    ]
+    # documents: list[Document] = [
+    #     (
+    #         {"content": doc["content"], "mime_type": "text/plain"}
+    #         if doc["mime_type"].lower() in ("application/json", "application/xml")
+    #         else doc
+    #     )
+    #     for doc in query_request.get_documents()
+    # ]
 
     response = await agent.create_turn(
         messages=[UserMessage(role="user", content=query_request.query).model_dump()],
@@ -771,6 +758,8 @@ async def retrieve_response(  # pylint: disable=too-many-locals,too-many-branche
             else ""
         ),
         tool_calls=[],
+        tool_results=[],
+        rag_chunks=[],
     )
 
     referenced_documents = parse_referenced_documents(response)

@@ -49,6 +49,7 @@ from models.requests import QueryRequest
 from models.responses import (
     ForbiddenResponse,
     InternalServerErrorResponse,
+    PromptTooLongResponse,
     NotFoundResponse,
     QuotaExceededResponse,
     ServiceUnavailableResponse,
@@ -84,6 +85,7 @@ streaming_query_responses: dict[int | str, dict[str, Any]] = {
     404: NotFoundResponse.openapi_response(
         examples=["conversation", "model", "provider"]
     ),
+    413: PromptTooLongResponse.openapi_response(),
     422: UnprocessableEntityResponse.openapi_response(),
     429: QuotaExceededResponse.openapi_response(),
     500: InternalServerErrorResponse.openapi_response(examples=["configuration"]),
@@ -702,7 +704,10 @@ def create_agent_response_generator(  # pylint: disable=too-many-locals
         complete response for transcript storage if enabled.
         """
         chunk_id = 0
-        summary = TurnSummary(llm_response="No response from the model", tool_calls=[])
+        summary = TurnSummary(
+            llm_response="No response from the model",
+            tool_calls=[], tool_results=[], rag_chunks=[]
+        )
 
         # Determine media type for response formatting
         media_type = context.query_request.media_type or MEDIA_TYPE_JSON
@@ -1062,14 +1067,14 @@ async def retrieve_response(
             toolgroups = None
 
     # TODO: LCORE-881 - Remove if Llama Stack starts to support these mime types
-    documents: list[Document] = [
-        (
-            {"content": doc["content"], "mime_type": "text/plain"}
-            if doc["mime_type"].lower() in ("application/json", "application/xml")
-            else doc
-        )
-        for doc in query_request.get_documents()
-    ]
+    # documents: list[Document] = [
+    #     (
+    #         {"content": doc["content"], "mime_type": "text/plain"}
+    #         if doc["mime_type"].lower() in ("application/json", "application/xml")
+    #         else doc
+    #     )
+    #     for doc in query_request.get_documents()
+    # ]
 
     response = await agent.create_turn(
         messages=[UserMessage(role="user", content=query_request.query).model_dump()],

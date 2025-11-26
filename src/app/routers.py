@@ -47,7 +47,7 @@ def include_routers(app: FastAPI) -> None:
     app.include_router(conversations_v2.router, prefix="/v2")
 
     # Note: query_v2, streaming_query_v2, and conversations_v3 are now exposed at /v1 above
-    # The old query, streaming_query, and conversations modules are deprecated but kept for reference
+    # The old query, streaming_query, and conversations modules are deprecated
 
     # road-core does not version these endpoints
     app.include_router(health.router)
