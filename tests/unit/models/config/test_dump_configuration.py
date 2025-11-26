@@ -589,6 +589,7 @@ def test_dump_configuration_byok(tmp_path: Path) -> None:
             "service": {
                 "host": "localhost",
                 "port": 8080,
+                "base_url": None,
                 "auth_enabled": False,
                 "workers": 1,
                 "color_log": True,

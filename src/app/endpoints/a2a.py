@@ -6,7 +6,7 @@ import logging
 import uuid
 from datetime import datetime
 from datetime import timezone
-from typing import Annotated, Any, AsyncIterator
+from typing import Annotated, Any, AsyncIterator, MutableMapping
 
 from fastapi import APIRouter, Depends, Request
 from starlette.responses import Response, StreamingResponse
@@ -17,6 +17,7 @@ from a2a.types import (
     AgentProvider,
     AgentCapabilities,
     Artifact,
+    Message,
     Part,
     TaskArtifactUpdateEvent,
     TaskState,
@@ -30,7 +31,7 @@ from a2a.server.request_handlers import DefaultRequestHandler
 from a2a.server.tasks import InMemoryTaskStore
 from a2a.server.tasks.task_updater import TaskUpdater
 from a2a.server.apps import A2AStarletteApplication
-from a2a.utils import new_agent_text_message
+from a2a.utils import new_agent_text_message, new_task
 
 from authentication.interface import AuthTuple
 from authentication import get_auth_dependency
@@ -98,9 +99,9 @@ def _convert_llama_content_to_a2a_parts(content: Any) -> list[Part]:
 class TaskResultAggregator:
     """Aggregates the task status updates and provides the final task state."""
 
-    def __init__(self):
+    def __init__(self) -> None:
         self._task_state = TaskState.working
-        self._task_status_message = None
+        self._task_status_message: Message | None = None
 
     def process_event(self, event: Any) -> None:
         """
@@ -192,14 +193,20 @@ class LightspeedAgentExecutor(AgentExecutor):
         if not context.message:
             raise ValueError("A2A request must have a message")
 
-        task_updater = TaskUpdater(event_queue, context.task_id, context.context_id)
+        task_id = context.task_id or ""
+        context_id = context.context_id or ""
         # for new task, create a task submitted event
         if not context.current_task:
-            await task_updater.update_status(
-                TaskState.submitted,
-                message=context.message,
-                final=False,
-            )
+            task = new_task(context.message)
+            await event_queue.enqueue_event(task)
+            # await task_updater.update_status(
+            #     TaskState.submitted,
+            #     message=context.message,
+            #    final=False,
+            # )
+            task_id = task.id
+            context_id = task.context_id
+        task_updater = TaskUpdater(event_queue, task_id, context_id)
 
         # Process the task with streaming
         try:
@@ -230,6 +237,12 @@ class LightspeedAgentExecutor(AgentExecutor):
             context: The request context
             task_updater: Task updater for sending events
         """
+        # Validate IDs
+        task_id = context.task_id
+        context_id = context.context_id
+        if not task_id or not context_id:
+            raise ValueError("Task ID and Context ID are required")
+
         # Extract user input using SDK utility
         user_input = context.get_user_input()
         if not user_input:
@@ -237,8 +250,8 @@ class LightspeedAgentExecutor(AgentExecutor):
                 TaskState.input_required,
                 message=new_agent_text_message(
                     "No input received. Please provide your input.",
-                    context_id=context.context_id,
-                    task_id=context.task_id,
+                    context_id=context_id,
+                    task_id=task_id,
                 ),
                 final=True,
             )
@@ -253,7 +266,7 @@ class LightspeedAgentExecutor(AgentExecutor):
         provider = metadata.get("provider") if metadata else None
 
         # Resolve conversation_id from A2A contextId to preserve multi-turn history
-        a2a_context_id = context.context_id
+        a2a_context_id = context_id
         conversation_id_hint = _CONTEXT_TO_CONVERSATION.get(a2a_context_id)
         logger.info(
             "A2A contextId %s maps to conversation_id %s",
@@ -301,12 +314,12 @@ class LightspeedAgentExecutor(AgentExecutor):
         # Emit working status with metadata before processing stream
         await event_queue.enqueue_event(
             TaskStatusUpdateEvent(
-                task_id=context.task_id,
+                task_id=task_id,
                 status=TaskStatus(
                     state=TaskState.working,
                     timestamp=datetime.now(timezone.utc).isoformat(),
                 ),
-                context_id=context.context_id,
+                context_id=context_id,
                 final=False,
                 metadata={
                     "model": llama_stack_model_id,
@@ -357,6 +370,11 @@ class LightspeedAgentExecutor(AgentExecutor):
         Yields:
             A2A events (TaskStatusUpdateEvent or TaskArtifactUpdateEvent)
         """
+        task_id = context.task_id
+        context_id = context.context_id
+        if not task_id or not context_id:
+            raise ValueError("Task ID and Context ID are required")
+
         artifact_id = str(uuid.uuid4())
 
         async for chunk in stream:
@@ -377,17 +395,17 @@ class LightspeedAgentExecutor(AgentExecutor):
                 # In strict ADK loop, we'd rely on the last message.
                 # Here we construct a new message.
                 yield TaskStatusUpdateEvent(
-                    task_id=context.task_id,
+                    task_id=task_id,
                     status=TaskStatus(
                         state=TaskState.input_required,
                         message=new_agent_text_message(
                             "",  # Text accumulated in aggregator or separate
-                            context_id=context.context_id,
-                            task_id=context.task_id,
+                            context_id=context_id,
+                            task_id=task_id,
                         ),
                         timestamp=datetime.now(timezone.utc).isoformat(),
                     ),
-                    context_id=context.context_id,
+                    context_id=context_id,
                     final=False,  # Will be handled by aggregator/loop end
                 )
 
@@ -397,9 +415,9 @@ class LightspeedAgentExecutor(AgentExecutor):
                 output_message = chunk.event.payload.turn.output_message
                 a2a_parts = _convert_llama_content_to_a2a_parts(output_message.content)
                 yield TaskArtifactUpdateEvent(
-                    task_id=context.task_id,
+                    task_id=task_id,
                     last_chunk=True,
-                    context_id=context.context_id,
+                    context_id=context_id,
                     artifact=Artifact(
                         artifact_id=artifact_id,
                         parts=a2a_parts,
@@ -412,17 +430,17 @@ class LightspeedAgentExecutor(AgentExecutor):
                     delta = payload.delta
                     if delta.type == "text" and delta.text:
                         yield TaskStatusUpdateEvent(
-                            task_id=context.task_id,
+                            task_id=task_id,
                             status=TaskStatus(
                                 state=TaskState.working,
                                 message=new_agent_text_message(
                                     delta.text,
-                                    context_id=context.context_id,
-                                    task_id=context.task_id,
+                                    context_id=context_id,
+                                    task_id=task_id,
                                 ),
                                 timestamp=datetime.now(timezone.utc).isoformat(),
                             ),
-                            context_id=context.context_id,
+                            context_id=context_id,
                             final=False,
                         )
                     elif delta.type == "tool_call":
@@ -435,17 +453,17 @@ class LightspeedAgentExecutor(AgentExecutor):
                             tool_name = delta.tool_call.tool_name
                             logger.debug("Tool call completed: %s", tool_name)
                             yield TaskStatusUpdateEvent(
-                                task_id=context.task_id,
+                                task_id=task_id,
                                 status=TaskStatus(
                                     state=TaskState.working,
                                     message=new_agent_text_message(
                                         f"Calling tool: {tool_name}",
-                                        context_id=context.context_id,
-                                        task_id=context.task_id,
+                                        context_id=context_id,
+                                        task_id=task_id,
                                     ),
                                     timestamp=datetime.now(timezone.utc).isoformat(),
                                 ),
-                                context_id=context.context_id,
+                                context_id=context_id,
                                 final=False,
                             )
 
@@ -672,7 +690,7 @@ async def handle_a2a_jsonrpc(  # pylint: disable=too-many-locals,too-many-statem
     # We need to re-provide the body since we already read it
     body_sent = False
 
-    async def receive():
+    async def receive() -> MutableMapping[str, Any]:
         nonlocal body_sent
         if not body_sent:
             body_sent = True
