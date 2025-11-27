@@ -3868,6 +3868,17 @@ Examples
 
 
 
+## APIKeyTokenConfiguration
+
+
+API Key Token configuration.
+
+
+| Field | Type | Description |
+|-------|------|-------------|
+| api_key | string |  |
+
+
 ## AccessRule
 
 
@@ -3931,6 +3942,7 @@ Authentication configuration.
 | k8s_cluster_api |  |  |
 | k8s_ca_cert_path |  |  |
 | jwk_config |  |  |
+| api_key_config |  |  |
 | rh_identity_config |  |  |
 
 

@@ -4360,6 +4360,19 @@
     },
     "components": {
         "schemas": {
+            "APIKeyTokenConfiguration": {
+                "properties": {
+                    "api_key": {
+                        "type": "string",
+                        "title": "Api Key",
+                        "default": "some-api-key"
+                    }
+                },
+                "additionalProperties": false,
+                "type": "object",
+                "title": "APIKeyTokenConfiguration",
+                "description": "API Key Token configuration."
+            },
             "AccessRule": {
                 "properties": {
                     "role": {
@@ -4510,6 +4523,16 @@
                         "anyOf": [
                             {
                                 "$ref": "#/components/schemas/JwkConfiguration"
+                            },
+                            {
+                                "type": "null"
+                            }
+                        ]
+                    },
+                    "api_key_config": {
+                        "anyOf": [
+                            {
+                                "$ref": "#/components/schemas/APIKeyTokenConfiguration"
                             },
                             {
                                 "type": "null"
