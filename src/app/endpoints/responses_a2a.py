@@ -97,8 +97,8 @@ class ResponsesAgentExecutor(AgentExecutor):
             auth_token: Authentication token for the request
             mcp_headers: MCP headers for context propagation
         """
-        self.auth_token = auth_token
-        self.mcp_headers = mcp_headers or {}
+        self.auth_token: str = auth_token
+        self.mcp_headers: dict[str, dict[str, str]] = mcp_headers or {}
 
     async def execute(
         self,
@@ -127,7 +127,7 @@ class ResponsesAgentExecutor(AgentExecutor):
         # Process the task with streaming
         try:
             await self._process_task_streaming(context, task_updater)
-        except Exception as e:
+        except Exception as e:  # pylint: disable=broad-exception-caught
             logger.error("Error handling A2A request: %s", e, exc_info=True)
             try:
                 await task_updater.update_status(
@@ -135,7 +135,7 @@ class ResponsesAgentExecutor(AgentExecutor):
                     message=new_agent_text_message(str(e)),
                     final=True,
                 )
-            except Exception as enqueue_error:
+            except Exception as enqueue_error:  # pylint: disable=broad-exception-caught
                 logger.error(
                     "Failed to publish failure event: %s", enqueue_error, exc_info=True
                 )
@@ -193,6 +193,11 @@ class ResponsesAgentExecutor(AgentExecutor):
             conversation_id=previous_response_id,
             model=model,
             provider=provider,
+            system_prompt=None,
+            attachments=None,
+            no_tools=False,
+            generate_topic_summary=True,
+            media_type=None,
         )
 
         # Get LLM client and select model
@@ -450,7 +455,7 @@ async def handle_responses_a2a_jsonrpc(  # pylint: disable=too-many-locals,too-m
     auth: Annotated[AuthTuple, Depends(auth_dependency)],
     mcp_headers: dict[str, dict[str, str]] = Depends(mcp_headers_dependency),
 ) -> Response | StreamingResponse:
-    """A2A JSON-RPC endpoint using Responses API.
+    """Handle A2A JSON-RPC requests following the A2A protocol specification, using Responses API.
 
     This endpoint uses the DefaultRequestHandler from the A2A SDK to handle
     all JSON-RPC requests including message/send, message/stream, etc.
@@ -501,7 +506,7 @@ async def handle_responses_a2a_jsonrpc(  # pylint: disable=too-many-locals,too-m
         logger.error("Error detecting streaming request: %s", str(e))
 
     # Setup scope for A2A app
-    scope = request.scope.copy()
+    scope = dict(request.scope)
     scope["path"] = "/"
 
     body_sent = False
@@ -541,7 +546,8 @@ async def handle_responses_a2a_jsonrpc(  # pylint: disable=too-many-locals,too-m
 
         app_task = asyncio.create_task(run_a2a_app())
 
-        async def response_generator() -> Any:
+        async def response_generator() -> AsyncIterator[bytes]:
+            """Generate chunks from the queue for streaming response."""
             chunk_count = 0
             try:
                 while True:
