@@ -8,7 +8,7 @@ from datetime import datetime
 from datetime import timezone
 from typing import Annotated, Any, AsyncIterator, MutableMapping
 
-from fastapi import APIRouter, Depends, Request
+from fastapi import APIRouter, Depends, HTTPException, Request, status
 from starlette.responses import Response, StreamingResponse
 
 from a2a.types import (
@@ -87,7 +87,7 @@ def _convert_llama_content_to_a2a_parts(content: Any) -> list[Part]:
             if hasattr(item, "type"):
                 if item.type == "text":
                     parts.append(Part(root=TextPart(text=item.text)))
-                # TODO: Handle image content if needed
+                # Note: image content is not yet handled; extend this branch if needed.
             elif isinstance(item, str):
                 parts.append(Part(root=TextPart(text=item)))
     elif hasattr(content, "type") and content.type == "text":
@@ -100,10 +100,13 @@ class TaskResultAggregator:
     """Aggregates the task status updates and provides the final task state."""
 
     def __init__(self) -> None:
-        self._task_state = TaskState.working
+        """Initialize the task result aggregator with default state."""
+        self._task_state: TaskState = TaskState.working
         self._task_status_message: Message | None = None
 
-    def process_event(self, event: Any) -> None:
+    def process_event(
+        self, event: TaskStatusUpdateEvent | TaskArtifactUpdateEvent | Any
+    ) -> None:
         """
         Process an event from the agent run and detect signals about the task status.
 
@@ -174,8 +177,8 @@ class LightspeedAgentExecutor(AgentExecutor):
             auth_token: Authentication token for the request
             mcp_headers: MCP headers for context propagation
         """
-        self.auth_token = auth_token
-        self.mcp_headers = mcp_headers or {}
+        self.auth_token: str = auth_token
+        self.mcp_headers: dict[str, dict[str, str]] = mcp_headers or {}
 
     async def execute(
         self,
@@ -211,7 +214,7 @@ class LightspeedAgentExecutor(AgentExecutor):
         # Process the task with streaming
         try:
             await self._process_task_streaming(context, task_updater)
-        except Exception as e:
+        except Exception as e:  # pylint: disable=broad-exception-caught
             logger.error("Error handling A2A request: %s", e, exc_info=True)
             # Publish failure event
             try:
@@ -220,7 +223,7 @@ class LightspeedAgentExecutor(AgentExecutor):
                     message=new_agent_text_message(str(e)),
                     final=True,
                 )
-            except Exception as enqueue_error:
+            except Exception as enqueue_error:  # pylint: disable=broad-exception-caught
                 logger.error(
                     "Failed to publish failure event: %s", enqueue_error, exc_info=True
                 )
@@ -280,6 +283,11 @@ class LightspeedAgentExecutor(AgentExecutor):
             conversation_id=conversation_id_hint,
             model=model,
             provider=provider,
+            system_prompt=None,
+            attachments=None,
+            no_tools=False,
+            generate_topic_summary=True,
+            media_type=None,
         )
 
         # Get LLM client and select model
@@ -507,8 +515,17 @@ def get_lightspeed_agent_card() -> AgentCard:
         else "http://localhost:8080"
     )
 
+    if not configuration.customization:
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Customization configuration not found",
+        )
+
     if not configuration.customization.agent_card_config:
-        raise ValueError("Agent card configuration not found")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Agent card configuration not found",
+        )
 
     config = configuration.customization.agent_card_config
 
@@ -626,7 +643,7 @@ async def handle_a2a_jsonrpc(  # pylint: disable=too-many-locals,too-many-statem
     mcp_headers: dict[str, dict[str, str]] = Depends(mcp_headers_dependency),
 ) -> Response | StreamingResponse:
     """
-    Main A2A JSON-RPC endpoint following the A2A protocol specification.
+    Handle A2A JSON-RPC requests following the A2A protocol specification.
 
     This endpoint uses the DefaultRequestHandler from the A2A SDK to handle
     all JSON-RPC requests including message/send, message/stream, etc.
@@ -684,7 +701,7 @@ async def handle_a2a_jsonrpc(  # pylint: disable=too-many-locals,too-many-statem
         logger.error("Error detecting streaming request: %s", str(e))
 
     # Setup scope for A2A app
-    scope = request.scope.copy()
+    scope = dict(request.scope)
     scope["path"] = "/"  # A2A app expects root path
 
     # We need to re-provide the body since we already read it
@@ -734,8 +751,8 @@ async def handle_a2a_jsonrpc(  # pylint: disable=too-many-locals,too-many-statem
         # Start the A2A app task
         app_task = asyncio.create_task(run_a2a_app())
 
-        async def response_generator() -> Any:
-            """Generator that yields chunks from the queue."""
+        async def response_generator() -> AsyncIterator[bytes]:
+            """Generate chunks from the queue for streaming response."""
             chunk_count = 0
             try:
                 while True:

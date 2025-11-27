@@ -1464,7 +1464,7 @@ llslibdev = [
 
 [package.metadata]
 requires-dist = [
-    { name = "a2a-sdk" },
+    { name = "a2a-sdk", specifier = ">=0.3.4,<0.4.0" },
     { name = "aiohttp", specifier = ">=3.12.14" },
     { name = "authlib", specifier = ">=1.6.0" },
     { name = "cachetools", specifier = ">=6.1.0" },
