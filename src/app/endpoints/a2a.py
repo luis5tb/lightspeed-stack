@@ -200,13 +200,16 @@ class LightspeedAgentExecutor(AgentExecutor):
         context_id = context.context_id or ""
         # for new task, create a task submitted event
         if not context.current_task:
+            # Set context_id on message so new_task preserves it
+            if context_id and context.message:
+                logger.debug(
+                    "Setting context_id %s on message for A2A contextId %s",
+                    context_id,
+                    context.message.message_id,
+                )
+                context.message.context_id = context_id
             task = new_task(context.message)
             await event_queue.enqueue_event(task)
-            # await task_updater.update_status(
-            #     TaskState.submitted,
-            #     message=context.message,
-            #    final=False,
-            # )
             task_id = task.id
             context_id = task.context_id
         task_updater = TaskUpdater(event_queue, task_id, context_id)
