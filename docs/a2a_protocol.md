@@ -404,12 +404,59 @@ curl -X POST http://localhost:8090/a2a \
     "params": {
       "message": {
         "messageId": "msg-002",
+        "contextId": "previous-context-id-here",
         "role": "user",
         "parts": [
           {"type": "text", "text": "How do I create one?"}
         ]
-      },
-      "contextId": "previous-context-id-here"
+      }
+    }
+  }'
+```
+
+> **Important:** The `contextId` must be placed inside the `message` object, not at the `params` level. This is required by the A2A protocol specification for the server to correctly identify and continue the conversation.
+
+#### 5. Using Responses API Endpoint
+
+The Responses API endpoint (`/responses/a2a`) works the same way as the Agent API endpoint but uses the Responses API backend. Multi-turn conversations work by passing the `contextId` from a previous response:
+
+```bash
+# First message
+curl -X POST http://localhost:8090/responses/a2a \
+  -H "Authorization: Bearer $TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "jsonrpc": "2.0",
+    "id": "1",
+    "method": "message/send",
+    "params": {
+      "message": {
+        "messageId": "msg-001",
+        "role": "user",
+        "parts": [
+          {"type": "text", "text": "What is Kubernetes?"}
+        ]
+      }
+    }
+  }'
+
+# Follow-up message (use contextId from previous response)
+curl -X POST http://localhost:8090/responses/a2a \
+  -H "Authorization: Bearer $TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "jsonrpc": "2.0",
+    "id": "2",
+    "method": "message/send",
+    "params": {
+      "message": {
+        "messageId": "msg-002",
+        "contextId": "context-id-from-previous-response",
+        "role": "user",
+        "parts": [
+          {"type": "text", "text": "How do I create a pod?"}
+        ]
+      }
     }
   }'
 ```

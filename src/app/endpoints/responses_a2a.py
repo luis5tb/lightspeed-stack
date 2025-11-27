@@ -57,8 +57,8 @@ router = APIRouter(tags=["responses_a2a"])
 
 auth_dependency = get_auth_dependency()
 
-# Map A2A contextId -> Responses API conversation_id (response.id) for multi-turn
-_CONTEXT_TO_RESPONSE_ID: dict[str, str] = {}
+# Map A2A contextId -> conversation_id for multi-turn conversations
+_CONTEXT_TO_CONVERSATION_ID: dict[str, str] = {}
 
 
 def _convert_responses_content_to_a2a_parts(output: list[Any]) -> list[Part]:
@@ -118,6 +118,14 @@ class ResponsesAgentExecutor(AgentExecutor):
         context_id = context.context_id or ""
         # for new task, create a task submitted event
         if not context.current_task:
+            # Set context_id on message so new_task preserves it
+            if context_id and context.message:
+                logger.debug(
+                    "Setting context_id %s on message for A2A contextId %s",
+                    context_id,
+                    context.message.message_id,
+                )
+                context.message.context_id = context_id
             task = new_task(context.message)
             await event_queue.enqueue_event(task)
             task_id = task.id
@@ -178,19 +186,19 @@ class ResponsesAgentExecutor(AgentExecutor):
         model = metadata.get("model") if metadata else None
         provider = metadata.get("provider") if metadata else None
 
-        # Resolve previous_response_id from A2A contextId for multi-turn
+        # Resolve conversation_id from A2A contextId for multi-turn
         a2a_context_id = context_id
-        previous_response_id = _CONTEXT_TO_RESPONSE_ID.get(a2a_context_id)
+        conversation_id = _CONTEXT_TO_CONVERSATION_ID.get(a2a_context_id)
         logger.info(
-            "A2A contextId %s maps to previous_response_id %s",
+            "A2A contextId %s maps to conversation_id %s",
             a2a_context_id,
-            previous_response_id,
+            conversation_id,
         )
 
-        # Build internal query request
+        # Build internal query request (conversation_id may be None for first turn)
         query_request = QueryRequest(
             query=user_input,
-            conversation_id=previous_response_id,
+            conversation_id=conversation_id,
             model=model,
             provider=provider,
             system_prompt=None,
@@ -208,7 +216,8 @@ class ResponsesAgentExecutor(AgentExecutor):
         )
 
         # Stream response from LLM using the shared retrieve_response function
-        stream, response_id = await retrieve_responses_api_response(
+        # retrieve_responses_api_response creates conversation if not provided and returns conv_id
+        stream, conversation_id = await retrieve_responses_api_response(
             client,
             llama_stack_model_id,
             query_request,
@@ -216,12 +225,12 @@ class ResponsesAgentExecutor(AgentExecutor):
             mcp_headers=self.mcp_headers,
         )
 
-        # Persist response_id for next turn in same A2A context
-        if response_id:
-            _CONTEXT_TO_RESPONSE_ID[a2a_context_id] = response_id
+        # Persist conversation_id for next turn in same A2A context
+        if conversation_id:
+            _CONTEXT_TO_CONVERSATION_ID[a2a_context_id] = conversation_id
             logger.info(
-                "Persisted response_id %s for A2A contextId %s",
-                response_id,
+                "Persisted conversation_id %s for A2A contextId %s",
+                conversation_id,
                 a2a_context_id,
             )
 
@@ -241,14 +250,14 @@ class ResponsesAgentExecutor(AgentExecutor):
                 final=False,
                 metadata={
                     "model": llama_stack_model_id,
-                    "response_id": response_id or "",
+                    "conversation_id": conversation_id,
                 },
             )
         )
 
         # Process stream using generator and aggregator pattern
         async for a2a_event in self._convert_stream_to_events(
-            stream, context, response_id
+            stream, context, conversation_id
         ):
             aggregator.process_event(a2a_event)
             await event_queue.enqueue_event(a2a_event)
@@ -272,14 +281,14 @@ class ResponsesAgentExecutor(AgentExecutor):
         self,
         stream: AsyncIterator[OpenAIResponseObjectStream],
         context: RequestContext,
-        response_id: str | None,
+        conversation_id: str | None,
     ) -> AsyncIterator[Any]:
         """Convert Responses API stream chunks to A2A events.
 
         Args:
             stream: The Responses API response stream
             context: The request context
-            response_id: The response ID (may be updated from stream)
+            conversation_id: The conversation ID for this A2A context
 
         Yields:
             A2A events (TaskStatusUpdateEvent or TaskArtifactUpdateEvent)
@@ -291,20 +300,12 @@ class ResponsesAgentExecutor(AgentExecutor):
 
         artifact_id = str(uuid.uuid4())
         text_parts: list[str] = []
-        current_response_id = response_id
 
         async for chunk in stream:
             event_type = getattr(chunk, "type", None)
 
-            # Extract response ID from response.created
+            # Skip response.created - conversation is already created
             if event_type == "response.created":
-                try:
-                    current_response_id = getattr(chunk, "response").id
-                    # Update the context mapping with the actual response ID
-                    if current_response_id and context_id:
-                        _CONTEXT_TO_RESPONSE_ID[context_id] = current_response_id
-                except Exception:  # pylint: disable=broad-except
-                    logger.warning("Missing response id in response.created")
                 continue
 
             # Text streaming - emit as working status with text delta
@@ -385,7 +386,7 @@ class ResponsesAgentExecutor(AgentExecutor):
                     artifact=Artifact(
                         artifact_id=artifact_id,
                         parts=a2a_parts,
-                        metadata={"response_id": str(current_response_id or "")},
+                        metadata={"conversation_id": str(conversation_id or "")},
                     ),
                 )
 

@@ -25,7 +25,7 @@ from app.endpoints.responses_a2a import (
     _convert_responses_content_to_a2a_parts,
     get_responses_agent_card,
     ResponsesAgentExecutor,
-    _CONTEXT_TO_RESPONSE_ID,
+    _CONTEXT_TO_CONVERSATION_ID,
     responses_a2a_health_check,
     get_responses_agent_card_endpoint,
 )
@@ -381,14 +381,14 @@ class TestResponsesAgentExecutor:
 
 
 # -----------------------------
-# Tests for context to response ID mapping
+# Tests for context to conversation ID mapping
 # -----------------------------
-class TestContextToResponseIdMapping:  # pylint: disable=too-few-public-methods
-    """Tests for the context to response ID mapping."""
+class TestContextToConversationIdMapping:  # pylint: disable=too-few-public-methods
+    """Tests for the context to conversation ID mapping."""
 
-    def test_context_to_response_id_is_dict(self) -> None:
-        """Test that _CONTEXT_TO_RESPONSE_ID is a dict."""
-        assert isinstance(_CONTEXT_TO_RESPONSE_ID, dict)
+    def test_context_to_conversation_id_is_dict(self) -> None:
+        """Test that _CONTEXT_TO_CONVERSATION_ID is a dict."""
+        assert isinstance(_CONTEXT_TO_CONVERSATION_ID, dict)
 
 
 # -----------------------------
@@ -401,7 +401,7 @@ class TestConvertStreamToEvents:
     async def test_convert_response_created_event(
         self, mocker: MockerFixture  # pylint: disable=unused-argument
     ) -> None:
-        """Test converting response.created event extracts response ID."""
+        """Test converting response.created event is skipped (conversation created upfront)."""
         executor = ResponsesAgentExecutor(auth_token="test-token")
 
         # Create mock context
@@ -423,17 +423,12 @@ class TestConvertStreamToEvents:
         # Convert stream to events
         events = []
         async for event in executor._convert_stream_to_events(
-            mock_stream(), context, None
+            mock_stream(), context, "conv-already-created"
         ):
             events.append(event)
 
-        # response.created should not yield events, just update state
+        # response.created should not yield events (skipped since conversation is created upfront)
         assert len(events) == 0
-        # But should have updated the context mapping
-        assert _CONTEXT_TO_RESPONSE_ID.get("ctx-456") == "resp-789"
-
-        # Clean up
-        _CONTEXT_TO_RESPONSE_ID.pop("ctx-456", None)
 
     @pytest.mark.asyncio
     async def test_convert_text_delta_event(
