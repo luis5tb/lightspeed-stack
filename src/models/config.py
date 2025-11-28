@@ -751,6 +751,64 @@ class ConversationHistoryConfiguration(ConfigurationBase):
         return self
 
 
+class A2AStateConfiguration(ConfigurationBase):
+    """A2A protocol persistent state configuration.
+
+    Configures how A2A task state and context-to-conversation mappings are
+    stored. For multi-worker deployments, use SQLite or PostgreSQL to ensure
+    state is shared across all workers.
+
+    If no configuration is provided, in-memory storage is used (default).
+    This is suitable for single-worker deployments but state will be lost
+    on restarts and not shared across workers.
+
+    Attributes:
+        sqlite: SQLite database configuration for A2A state storage.
+        postgres: PostgreSQL database configuration for A2A state storage.
+    """
+
+    sqlite: Optional[SQLiteDatabaseConfiguration] = Field(
+        default=None,
+        title="SQLite configuration",
+        description="SQLite database configuration for A2A state storage.",
+    )
+    postgres: Optional[PostgreSQLDatabaseConfiguration] = Field(
+        default=None,
+        title="PostgreSQL configuration",
+        description="PostgreSQL database configuration for A2A state storage.",
+    )
+
+    @model_validator(mode="after")
+    def check_a2a_state_configuration(self) -> Self:
+        """Validate A2A state configuration - only one type can be configured."""
+        total_configured = sum([self.sqlite is not None, self.postgres is not None])
+
+        if total_configured > 1:
+            raise ValueError("Only one A2A state storage configuration can be provided")
+
+        return self
+
+    @property
+    def storage_type(self) -> Literal["memory", "sqlite", "postgres"]:
+        """Return the configured storage type."""
+        if self.sqlite is not None:
+            return "sqlite"
+        if self.postgres is not None:
+            return "postgres"
+        return "memory"
+
+    @property
+    def config(
+        self,
+    ) -> SQLiteDatabaseConfiguration | PostgreSQLDatabaseConfiguration | None:
+        """Return the active storage configuration, or None for memory storage."""
+        if self.sqlite is not None:
+            return self.sqlite
+        if self.postgres is not None:
+            return self.postgres
+        return None
+
+
 class ByokRag(ConfigurationBase):
     """BYOK RAG configuration."""
 
@@ -811,6 +869,11 @@ class Configuration(ConfigurationBase):
     inference: InferenceConfiguration = Field(default_factory=InferenceConfiguration)
     conversation_cache: ConversationHistoryConfiguration = Field(
         default_factory=ConversationHistoryConfiguration
+    )
+    a2a_state: A2AStateConfiguration = Field(
+        default_factory=A2AStateConfiguration,
+        title="A2A state configuration",
+        description="Configuration for A2A protocol persistent state storage.",
     )
     byok_rag: list[ByokRag] = Field(default_factory=list)
     quota_handlers: QuotaHandlersConfiguration = Field(
