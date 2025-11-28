@@ -1383,6 +1383,8 @@ source = { editable = "." }
 dependencies = [
     { name = "a2a-sdk" },
     { name = "aiohttp" },
+    { name = "aiosqlite" },
+    { name = "asyncpg" },
     { name = "authlib" },
     { name = "cachetools" },
     { name = "email-validator" },
@@ -1390,7 +1392,6 @@ dependencies = [
     { name = "jsonpath-ng" },
     { name = "kubernetes" },
     { name = "litellm" },
-    { name = "llama-stack" },
     { name = "llama-stack-client" },
     { name = "openai" },
     { name = "prometheus-client" },
@@ -1466,6 +1467,8 @@ llslibdev = [
 requires-dist = [
     { name = "a2a-sdk", specifier = ">=0.3.4,<0.4.0" },
     { name = "aiohttp", specifier = ">=3.12.14" },
+    { name = "aiosqlite", specifier = ">=0.21.0" },
+    { name = "asyncpg", specifier = ">=0.31.0" },
     { name = "authlib", specifier = ">=1.6.0" },
     { name = "cachetools", specifier = ">=6.1.0" },
     { name = "email-validator", specifier = ">=2.2.0" },
@@ -1473,7 +1476,6 @@ requires-dist = [
     { name = "jsonpath-ng", specifier = ">=1.6.1" },
     { name = "kubernetes", specifier = ">=30.1.0" },
     { name = "litellm", specifier = ">=1.75.5.post1" },
-    { name = "llama-stack", specifier = "==0.3.0" },
     { name = "llama-stack-client", specifier = "==0.3.0" },
     { name = "openai", specifier = ">=1.99.9" },
     { name = "prometheus-client", specifier = ">=0.22.1" },
@@ -1566,42 +1568,6 @@ dependencies = [
 sdist = { url = "https://files.pythonhosted.org/packages/a5/3f/af532014449c3931ae6cad2d97d267dd43d0de006060a8cbf0962e004024/litellm-1.80.7.tar.gz", hash = "sha256:3977a8d195aef842d01c18bf9e22984829363c6a4b54daf9a43c9dd9f190b42c", size = 12023127, upload-time = "2025-11-27T23:03:52.474Z" }
 wheels = [
     { url = "https://files.pythonhosted.org/packages/54/e0/2e60a0c09235fd7b55297390c557923f3c35a9cf001914222c26a7857d2b/litellm-1.80.7-py3-none-any.whl", hash = "sha256:f7d993f78c1e0e4e1202b2a925cc6540b55b6e5fb055dd342d88b145ab3102ed", size = 10848321, upload-time = "2025-11-27T23:03:50.002Z" },
-]
-
-[[package]]
-name = "llama-stack"
-version = "0.3.0"
-source = { registry = "https://pypi.org/simple" }
-dependencies = [
-    { name = "aiohttp" },
-    { name = "aiosqlite" },
-    { name = "asyncpg" },
-    { name = "fastapi" },
-    { name = "fire" },
-    { name = "h11" },
-    { name = "httpx" },
-    { name = "jinja2" },
-    { name = "jsonschema" },
-    { name = "llama-stack-client" },
-    { name = "openai" },
-    { name = "opentelemetry-exporter-otlp-proto-http" },
-    { name = "opentelemetry-sdk" },
-    { name = "pillow" },
-    { name = "prompt-toolkit" },
-    { name = "pydantic" },
-    { name = "pyjwt", extra = ["crypto"] },
-    { name = "python-dotenv" },
-    { name = "python-multipart" },
-    { name = "rich" },
-    { name = "sqlalchemy", extra = ["asyncio"] },
-    { name = "starlette" },
-    { name = "termcolor" },
-    { name = "tiktoken" },
-    { name = "uvicorn" },
-]
-sdist = { url = "https://files.pythonhosted.org/packages/e3/c7/47963861f4f7f68dff6d82e4d8c697943b625b14ae73dce1d228ea72b9b4/llama_stack-0.3.0.tar.gz", hash = "sha256:8277c54cf4a283077143a0804128f2c76f1ec9660116353176c77b659206d315", size = 3317843, upload-time = "2025-10-21T23:58:35.103Z" }
-wheels = [
-    { url = "https://files.pythonhosted.org/packages/5e/05/3602d881ae6d174ac557e1ccac1572cbc087cd2178a2b77390320ffec47d/llama_stack-0.3.0-py3-none-any.whl", hash = "sha256:c2b999dced8970f3590ecd7eca50bef1bc0c052eec15b8aba78a5c17a0a4051d", size = 3629351, upload-time = "2025-10-21T23:58:33.677Z" },
 ]
 
 [[package]]
@@ -3412,11 +3378,6 @@ wheels = [
     { url = "https://files.pythonhosted.org/packages/32/d5/0e66097fc64fa266f29a7963296b40a80d6a997b7ac13806183700676f86/sqlalchemy-2.0.44-cp313-cp313-win32.whl", hash = "sha256:ee51625c2d51f8baadf2829fae817ad0b66b140573939dd69284d2ba3553ae73", size = 2101275, upload-time = "2025-10-10T15:03:26.096Z" },
     { url = "https://files.pythonhosted.org/packages/03/51/665617fe4f8c6450f42a6d8d69243f9420f5677395572c2fe9d21b493b7b/sqlalchemy-2.0.44-cp313-cp313-win_amd64.whl", hash = "sha256:c1c80faaee1a6c3428cecf40d16a2365bcf56c424c92c2b6f0f9ad204b899e9e", size = 2127901, upload-time = "2025-10-10T15:03:27.548Z" },
     { url = "https://files.pythonhosted.org/packages/9c/5e/6a29fa884d9fb7ddadf6b69490a9d45fded3b38541713010dad16b77d015/sqlalchemy-2.0.44-py3-none-any.whl", hash = "sha256:19de7ca1246fbef9f9d1bff8f1ab25641569df226364a0e40457dc5457c54b05", size = 1928718, upload-time = "2025-10-10T15:29:45.32Z" },
-]
-
-[package.optional-dependencies]
-asyncio = [
-    { name = "greenlet" },
 ]
 
 [[package]]
