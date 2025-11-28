@@ -1,14 +1,16 @@
-"""Handler for A2A (Agent-to-Agent) protocol endpoints."""
+"""Handler for A2A (Agent-to-Agent) protocol endpoints using Responses API."""
 
 import asyncio
 import json
 import logging
 import uuid
-from datetime import datetime
-from datetime import timezone
+from datetime import datetime, timezone
 from typing import Annotated, Any, AsyncIterator, MutableMapping
 
 from fastapi import APIRouter, Depends, HTTPException, Request, status
+from llama_stack.apis.agents.openai_responses import (
+    OpenAIResponseObjectStream,
+)
 from starlette.responses import Response, StreamingResponse
 
 from a2a.types import (
@@ -43,9 +45,10 @@ from app.endpoints.query import (
     select_model_and_provider_id,
     evaluate_model_hints,
 )
-from app.endpoints.streaming_query import retrieve_response
+from app.endpoints.streaming_query_v2 import retrieve_response
 from client import AsyncLlamaStackClientHolder
 from utils.mcp_headers import mcp_headers_dependency
+from utils.responses import extract_text_from_response_output_item
 from version import __version__
 
 logger = logging.getLogger("app.endpoints.handlers")
@@ -65,33 +68,21 @@ _TASK_STORE = InMemoryTaskStore()
 _CONTEXT_TO_CONVERSATION: dict[str, str] = {}
 
 
-def _convert_llama_content_to_a2a_parts(content: Any) -> list[Part]:
-    """
-    Convert Llama Stack InterleavedContent to A2A Parts.
+def _convert_responses_content_to_a2a_parts(output: list[Any]) -> list[Part]:
+    """Convert Responses API output to A2A Parts.
 
     Args:
-        content: Llama Stack content (str, TextContentItem, ImageContentItem, or list)
+        output: List of Responses API output items
 
     Returns:
         List of A2A Part objects
     """
     parts: list[Part] = []
 
-    if content is None:
-        return parts
-
-    if isinstance(content, str):
-        parts.append(Part(root=TextPart(text=content)))
-    elif isinstance(content, list):
-        for item in content:
-            if hasattr(item, "type"):
-                if item.type == "text":
-                    parts.append(Part(root=TextPart(text=item.text)))
-                # Note: image content is not yet handled; extend this branch if needed.
-            elif isinstance(item, str):
-                parts.append(Part(root=TextPart(text=item)))
-    elif hasattr(content, "type") and content.type == "text":
-        parts.append(Part(root=TextPart(text=content.text)))
+    for output_item in output:
+        text = extract_text_from_response_output_item(output_item)
+        if text:
+            parts.append(Part(root=TextPart(text=text)))
 
     return parts
 
@@ -159,19 +150,17 @@ class TaskResultAggregator:
 # -----------------------------
 # Agent Executor Implementation
 # -----------------------------
-class LightspeedAgentExecutor(AgentExecutor):
-    """
-    Lightspeed Agent Executor for OpenShift Assisted Chat Installer.
+class A2AAgentExecutor(AgentExecutor):
+    """Agent Executor for A2A using Llama Stack Responses API.
 
     This executor implements the A2A AgentExecutor interface and handles
-    routing queries to the appropriate LLM backend.
+    routing queries to the LLM backend using the Responses API.
     """
 
     def __init__(
         self, auth_token: str, mcp_headers: dict[str, dict[str, str]] | None = None
     ):
-        """
-        Initialize the Lightspeed agent executor.
+        """Initialize the A2A agent executor.
 
         Args:
             auth_token: Authentication token for the request
@@ -185,14 +174,12 @@ class LightspeedAgentExecutor(AgentExecutor):
         context: RequestContext,
         event_queue: EventQueue,
     ) -> None:
-        """
-        Execute the agent with the given context and send results to the event queue.
+        """Execute the agent with the given context and send results to the event queue.
 
         Args:
             context: The request context containing user input and metadata
             event_queue: Queue for sending response events
         """
-        # Get or create task
         if not context.message:
             raise ValueError("A2A request must have a message")
 
@@ -219,7 +206,6 @@ class LightspeedAgentExecutor(AgentExecutor):
             await self._process_task_streaming(context, task_updater)
         except Exception as e:  # pylint: disable=broad-exception-caught
             logger.error("Error handling A2A request: %s", e, exc_info=True)
-            # Publish failure event
             try:
                 await task_updater.update_status(
                     TaskState.failed,
@@ -231,19 +217,17 @@ class LightspeedAgentExecutor(AgentExecutor):
                     "Failed to publish failure event: %s", enqueue_error, exc_info=True
                 )
 
-    async def _process_task_streaming(  # pylint: disable=too-many-locals,too-many-branches,too-many-statements
+    async def _process_task_streaming(  # pylint: disable=too-many-locals
         self,
         context: RequestContext,
         task_updater: TaskUpdater,
     ) -> None:
-        """
-        Process the task with streaming updates.
+        """Process the task with streaming updates using Responses API.
 
         Args:
             context: The request context
             task_updater: Task updater for sending events
         """
-        # Validate IDs
         task_id = context.task_id
         context_id = context.context_id
         if not task_id or not context_id:
@@ -271,19 +255,19 @@ class LightspeedAgentExecutor(AgentExecutor):
         model = metadata.get("model") if metadata else None
         provider = metadata.get("provider") if metadata else None
 
-        # Resolve conversation_id from A2A contextId to preserve multi-turn history
+        # Resolve conversation_id from A2A contextId for multi-turn
         a2a_context_id = context_id
-        conversation_id_hint = _CONTEXT_TO_CONVERSATION.get(a2a_context_id)
+        conversation_id = _CONTEXT_TO_CONVERSATION.get(a2a_context_id)
         logger.info(
             "A2A contextId %s maps to conversation_id %s",
             a2a_context_id,
-            conversation_id_hint,
+            conversation_id,
         )
 
-        # Build internal query request with conversation_id for history
+        # Build internal query request (conversation_id may be None for first turn)
         query_request = QueryRequest(
             query=user_input,
-            conversation_id=conversation_id_hint,
+            conversation_id=conversation_id,
             model=model,
             provider=provider,
             system_prompt=None,
@@ -300,7 +284,7 @@ class LightspeedAgentExecutor(AgentExecutor):
             *evaluate_model_hints(user_conversation=None, query_request=query_request),
         )
 
-        # Stream response from LLM with status updates
+        # Stream response from LLM using the Responses API
         stream, conversation_id = await retrieve_response(
             client,
             llama_stack_model_id,
@@ -309,7 +293,7 @@ class LightspeedAgentExecutor(AgentExecutor):
             mcp_headers=self.mcp_headers,
         )
 
-        # Persist conversationId for next turn in same A2A context
+        # Persist conversation_id for next turn in same A2A context
         if conversation_id:
             _CONTEXT_TO_CONVERSATION[a2a_context_id] = conversation_id
             logger.info(
@@ -334,7 +318,7 @@ class LightspeedAgentExecutor(AgentExecutor):
                 final=False,
                 metadata={
                     "model": llama_stack_model_id,
-                    "conversation_id": conversation_id or "",
+                    "conversation_id": conversation_id,
                 },
             )
         )
@@ -348,15 +332,12 @@ class LightspeedAgentExecutor(AgentExecutor):
 
         # Publish the final task result event
         if aggregator.task_state == TaskState.working:
-            # If task is still working (and we finished the stream), it usually means
-            # we completed successfully. Send the completed status.
             await task_updater.update_status(
                 TaskState.completed,
                 timestamp=datetime.now(timezone.utc).isoformat(),
                 final=True,
             )
         else:
-            # Send the terminal state we collected (input_required, failed, etc.)
             await task_updater.update_status(
                 aggregator.task_state,
                 message=aggregator.task_status_message,
@@ -364,19 +345,18 @@ class LightspeedAgentExecutor(AgentExecutor):
                 final=True,
             )
 
-    async def _convert_stream_to_events(
+    async def _convert_stream_to_events(  # pylint: disable=too-many-branches,too-many-locals
         self,
-        stream: AsyncIterator[Any],
+        stream: AsyncIterator[OpenAIResponseObjectStream],
         context: RequestContext,
         conversation_id: str | None,
     ) -> AsyncIterator[Any]:
-        """
-        Convert Llama Stack stream chunks to A2A events.
+        """Convert Responses API stream chunks to A2A events.
 
         Args:
-            stream: The Llama Stack response stream
+            stream: The Responses API response stream
             context: The request context
-            conversation_id: The conversation ID
+            conversation_id: The conversation ID for this A2A context
 
         Yields:
             A2A events (TaskStatusUpdateEvent or TaskArtifactUpdateEvent)
@@ -387,44 +367,86 @@ class LightspeedAgentExecutor(AgentExecutor):
             raise ValueError("Task ID and Context ID are required")
 
         artifact_id = str(uuid.uuid4())
+        text_parts: list[str] = []
 
         async for chunk in stream:
-            if not (hasattr(chunk, "event") and chunk.event is not None):
+            event_type = getattr(chunk, "type", None)
+
+            # Skip response.created - conversation is already created
+            if event_type == "response.created":
                 continue
 
-            payload = chunk.event.payload
-            event_type = payload.event_type
+            # Text streaming - emit as working status with text delta
+            if event_type == "response.output_text.delta":
+                delta = getattr(chunk, "delta", "")
+                if delta:
+                    text_parts.append(delta)
+                    yield TaskStatusUpdateEvent(
+                        task_id=task_id,
+                        status=TaskStatus(
+                            state=TaskState.working,
+                            message=new_agent_text_message(
+                                delta,
+                                context_id=context_id,
+                                task_id=task_id,
+                            ),
+                            timestamp=datetime.now(timezone.utc).isoformat(),
+                        ),
+                        context_id=context_id,
+                        final=False,
+                    )
 
-            if event_type == "turn_awaiting_input":
-                logger.debug("Turn awaiting input")
-                # We don't have the accumulated text here easily if we rely on aggregator for that.
-                # But ADK approach implies we send a message.
-                # For now, we send an empty message or generic prompt,
-                # relying on the aggregator to capture previous working messages if needed.
-                # But wait, input_required needs a message.
-
-                # In strict ADK loop, we'd rely on the last message.
-                # Here we construct a new message.
+            # Tool call events
+            elif event_type == "response.function_call_arguments.done":
+                item_id = getattr(chunk, "item_id", "")
                 yield TaskStatusUpdateEvent(
                     task_id=task_id,
                     status=TaskStatus(
-                        state=TaskState.input_required,
+                        state=TaskState.working,
                         message=new_agent_text_message(
-                            "",  # Text accumulated in aggregator or separate
+                            f"Tool call: {item_id}",
                             context_id=context_id,
                             task_id=task_id,
                         ),
                         timestamp=datetime.now(timezone.utc).isoformat(),
                     ),
                     context_id=context_id,
-                    final=False,  # Will be handled by aggregator/loop end
+                    final=False,
                 )
 
-            elif event_type == "turn_complete":
-                logger.debug("Turn complete event")
-                # Convert Llama Stack content to A2A parts
-                output_message = chunk.event.payload.turn.output_message
-                a2a_parts = _convert_llama_content_to_a2a_parts(output_message.content)
+            # MCP call completion
+            elif event_type == "response.mcp_call.arguments.done":
+                item_id = getattr(chunk, "item_id", "")
+                yield TaskStatusUpdateEvent(
+                    task_id=task_id,
+                    status=TaskStatus(
+                        state=TaskState.working,
+                        message=new_agent_text_message(
+                            f"MCP call: {item_id}",
+                            context_id=context_id,
+                            task_id=task_id,
+                        ),
+                        timestamp=datetime.now(timezone.utc).isoformat(),
+                    ),
+                    context_id=context_id,
+                    final=False,
+                )
+
+            # Response completed - emit final artifact
+            elif event_type == "response.completed":
+                response_obj = getattr(chunk, "response", None)
+                final_text = "".join(text_parts)
+
+                if response_obj:
+                    output = getattr(response_obj, "output", [])
+                    a2a_parts = _convert_responses_content_to_a2a_parts(output)
+                    if not a2a_parts and final_text:
+                        a2a_parts = [Part(root=TextPart(text=final_text))]
+                else:
+                    a2a_parts = (
+                        [Part(root=TextPart(text=final_text))] if final_text else []
+                    )
+
                 yield TaskArtifactUpdateEvent(
                     task_id=task_id,
                     last_chunk=True,
@@ -432,59 +454,16 @@ class LightspeedAgentExecutor(AgentExecutor):
                     artifact=Artifact(
                         artifact_id=artifact_id,
                         parts=a2a_parts,
-                        metadata={"conversation_id": str(conversation_id)},
+                        metadata={"conversation_id": str(conversation_id or "")},
                     ),
                 )
-
-            elif event_type == "step_progress":
-                if hasattr(payload, "delta"):
-                    delta = payload.delta
-                    if delta.type == "text" and delta.text:
-                        yield TaskStatusUpdateEvent(
-                            task_id=task_id,
-                            status=TaskStatus(
-                                state=TaskState.working,
-                                message=new_agent_text_message(
-                                    delta.text,
-                                    context_id=context_id,
-                                    task_id=task_id,
-                                ),
-                                timestamp=datetime.now(timezone.utc).isoformat(),
-                            ),
-                            context_id=context_id,
-                            final=False,
-                        )
-                    elif delta.type == "tool_call":
-                        # Only emit status when tool call parsing is complete
-                        if (
-                            hasattr(delta, "parse_status")
-                            and delta.parse_status == "succeeded"
-                            and hasattr(delta.tool_call, "tool_name")
-                        ):
-                            tool_name = delta.tool_call.tool_name
-                            logger.debug("Tool call completed: %s", tool_name)
-                            yield TaskStatusUpdateEvent(
-                                task_id=task_id,
-                                status=TaskStatus(
-                                    state=TaskState.working,
-                                    message=new_agent_text_message(
-                                        f"Calling tool: {tool_name}",
-                                        context_id=context_id,
-                                        task_id=task_id,
-                                    ),
-                                    timestamp=datetime.now(timezone.utc).isoformat(),
-                                ),
-                                context_id=context_id,
-                                final=False,
-                            )
 
     async def cancel(
         self,
         context: RequestContext,  # pylint: disable=unused-argument
         event_queue: EventQueue,  # pylint: disable=unused-argument
     ) -> None:
-        """
-        Handle task cancellation.
+        """Handle task cancellation.
 
         Args:
             context: The request context
@@ -611,8 +590,7 @@ async def get_agent_card(  # pylint: disable=unused-argument
 
 
 def _create_a2a_app(auth_token: str, mcp_headers: dict[str, dict[str, str]]) -> Any:
-    """
-    Create an A2A Starlette application instance with auth context.
+    """Create an A2A Starlette application instance with auth context.
 
     Args:
         auth_token: Authentication token for the request
@@ -621,9 +599,7 @@ def _create_a2a_app(auth_token: str, mcp_headers: dict[str, dict[str, str]]) -> 
     Returns:
         A2A Starlette ASGI application
     """
-    agent_executor = LightspeedAgentExecutor(
-        auth_token=auth_token, mcp_headers=mcp_headers
-    )
+    agent_executor = A2AAgentExecutor(auth_token=auth_token, mcp_headers=mcp_headers)
 
     request_handler = DefaultRequestHandler(
         agent_executor=agent_executor,

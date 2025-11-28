@@ -25,9 +25,9 @@ from a2a.server.events import EventQueue
 from a2a.utils import new_agent_text_message
 
 from app.endpoints.a2a import (
-    _convert_llama_content_to_a2a_parts,
+    _convert_responses_content_to_a2a_parts,
     get_lightspeed_agent_card,
-    LightspeedAgentExecutor,
+    A2AAgentExecutor,
     TaskResultAggregator,
     _CONTEXT_TO_CONVERSATION,
     _TASK_STORE,
@@ -138,64 +138,59 @@ def setup_minimal_configuration_fixture(mocker: MockerFixture) -> AppConfig:
 
 
 # -----------------------------
-# Tests for _convert_llama_content_to_a2a_parts
+# Tests for _convert_responses_content_to_a2a_parts
 # -----------------------------
-class TestConvertLlamaContentToA2AParts:
+class TestConvertResponsesContentToA2AParts:
     """Tests for the content conversion function."""
 
-    def test_convert_none_content(self) -> None:
-        """Test converting None content returns empty list."""
-        result = _convert_llama_content_to_a2a_parts(None)
+    def test_convert_empty_output(self, mocker: MockerFixture) -> None:
+        """Test converting empty output returns empty list."""
+        mocker.patch(
+            "app.endpoints.a2a.extract_text_from_response_output_item",
+            return_value=None,
+        )
+        result = _convert_responses_content_to_a2a_parts([])
         assert not result
 
-    def test_convert_string_content(self) -> None:
-        """Test converting string content."""
-        result = _convert_llama_content_to_a2a_parts("Hello, world!")
+    def test_convert_single_output_item(self, mocker: MockerFixture) -> None:
+        """Test converting single output item with text."""
+        mocker.patch(
+            "app.endpoints.a2a.extract_text_from_response_output_item",
+            return_value="Hello, world!",
+        )
+        mock_output_item = MagicMock()
+        result = _convert_responses_content_to_a2a_parts([mock_output_item])
         assert len(result) == 1
         assert result[0].root.text == "Hello, world!"
 
-    def test_convert_text_content_item(self) -> None:
-        """Test converting TextContentItem."""
-        mock_item = MagicMock()
-        mock_item.type = "text"
-        mock_item.text = "Test content"
+    def test_convert_multiple_output_items(self, mocker: MockerFixture) -> None:
+        """Test converting multiple output items."""
+        extract_mock = mocker.patch(
+            "app.endpoints.a2a.extract_text_from_response_output_item",
+        )
+        extract_mock.side_effect = ["First", "Second"]
 
-        result = _convert_llama_content_to_a2a_parts(mock_item)
-        assert len(result) == 1
-        assert result[0].root.text == "Test content"
-
-    def test_convert_list_of_text_items(self) -> None:
-        """Test converting list of text items."""
         mock_item1 = MagicMock()
-        mock_item1.type = "text"
-        mock_item1.text = "First"
-
         mock_item2 = MagicMock()
-        mock_item2.type = "text"
-        mock_item2.text = "Second"
 
-        result = _convert_llama_content_to_a2a_parts([mock_item1, mock_item2])
+        result = _convert_responses_content_to_a2a_parts([mock_item1, mock_item2])
         assert len(result) == 2
         assert result[0].root.text == "First"
         assert result[1].root.text == "Second"
 
-    def test_convert_list_of_strings(self) -> None:
-        """Test converting list of strings."""
-        result = _convert_llama_content_to_a2a_parts(["Hello", "World"])
-        assert len(result) == 2
-        assert result[0].root.text == "Hello"
-        assert result[1].root.text == "World"
+    def test_convert_output_items_with_none_text(self, mocker: MockerFixture) -> None:
+        """Test that output items with no text are filtered out."""
+        extract_mock = mocker.patch(
+            "app.endpoints.a2a.extract_text_from_response_output_item",
+        )
+        extract_mock.side_effect = ["Valid text", None, "Another valid"]
 
-    def test_convert_mixed_list(self) -> None:
-        """Test converting mixed list of strings and text items."""
-        mock_item = MagicMock()
-        mock_item.type = "text"
-        mock_item.text = "Text item"
+        mock_items = [MagicMock(), MagicMock(), MagicMock()]
 
-        result = _convert_llama_content_to_a2a_parts(["String", mock_item])
+        result = _convert_responses_content_to_a2a_parts(mock_items)
         assert len(result) == 2
-        assert result[0].root.text == "String"
-        assert result[1].root.text == "Text item"
+        assert result[0].root.text == "Valid text"
+        assert result[1].root.text == "Another valid"
 
 
 # -----------------------------
@@ -382,14 +377,14 @@ class TestGetLightspeedAgentCard:
 
 
 # -----------------------------
-# Tests for LightspeedAgentExecutor
+# Tests for A2AAgentExecutor
 # -----------------------------
-class TestLightspeedAgentExecutor:
-    """Tests for the LightspeedAgentExecutor class."""
+class TestA2AAgentExecutor:
+    """Tests for the A2AAgentExecutor class."""
 
     def test_executor_initialization(self) -> None:
         """Test executor initialization."""
-        executor = LightspeedAgentExecutor(
+        executor = A2AAgentExecutor(
             auth_token="test-token",
             mcp_headers={"server1": {"header1": "value1"}},
         )
@@ -399,7 +394,7 @@ class TestLightspeedAgentExecutor:
 
     def test_executor_initialization_default_mcp_headers(self) -> None:
         """Test executor initialization with default mcp_headers."""
-        executor = LightspeedAgentExecutor(auth_token="test-token")
+        executor = A2AAgentExecutor(auth_token="test-token")
 
         assert executor.auth_token == "test-token"
         assert executor.mcp_headers == {}
@@ -407,7 +402,7 @@ class TestLightspeedAgentExecutor:
     @pytest.mark.asyncio
     async def test_execute_without_message_raises_error(self) -> None:
         """Test that execute raises error when message is missing."""
-        executor = LightspeedAgentExecutor(auth_token="test-token")
+        executor = A2AAgentExecutor(auth_token="test-token")
 
         context = MagicMock(spec=RequestContext)
         context.message = None
@@ -424,7 +419,7 @@ class TestLightspeedAgentExecutor:
         setup_configuration: AppConfig,  # pylint: disable=unused-argument
     ) -> None:
         """Test that execute creates a new task when current_task is None."""
-        executor = LightspeedAgentExecutor(auth_token="test-token")
+        executor = A2AAgentExecutor(auth_token="test-token")
 
         # Mock the context with a mock message
         mock_message = MagicMock()
@@ -467,7 +462,7 @@ class TestLightspeedAgentExecutor:
         setup_configuration: AppConfig,  # pylint: disable=unused-argument
     ) -> None:
         """Test that execute handles errors and sends failure event."""
-        executor = LightspeedAgentExecutor(auth_token="test-token")
+        executor = A2AAgentExecutor(auth_token="test-token")
 
         # Mock the context with a mock message
         mock_message = MagicMock()
@@ -513,7 +508,7 @@ class TestLightspeedAgentExecutor:
         setup_configuration: AppConfig,  # pylint: disable=unused-argument
     ) -> None:
         """Test _process_task_streaming when no input is provided."""
-        executor = LightspeedAgentExecutor(auth_token="test-token")
+        executor = A2AAgentExecutor(auth_token="test-token")
 
         # Mock the context with no input
         mock_message = MagicMock()
@@ -545,7 +540,7 @@ class TestLightspeedAgentExecutor:
     @pytest.mark.asyncio
     async def test_cancel_raises_not_implemented(self) -> None:
         """Test that cancel raises NotImplementedError."""
-        executor = LightspeedAgentExecutor(auth_token="test-token")
+        executor = A2AAgentExecutor(auth_token="test-token")
 
         context = MagicMock(spec=RequestContext)
         event_queue = AsyncMock(spec=EventQueue)
