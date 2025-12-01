@@ -1,10 +1,12 @@
 """Handler for REST API calls to manage conversation history using Conversations API."""
 
 import logging
-from typing import Any
+from typing import Any, cast
 
 from fastapi import APIRouter, Depends, HTTPException, Request, status
-from llama_stack_client import APIConnectionError, NOT_GIVEN, NotFoundError
+from llama_stack_client import APIConnectionError, NOT_GIVEN, BadRequestError, NotFoundError
+from llama_stack_client.types.conversation_delete_response import ConversationDeleteResponse as CDR
+from sqlalchemy.exc import SQLAlchemyError
 
 from app.database import get_session
 from authentication import get_auth_dependency
@@ -22,6 +24,7 @@ from models.responses import (
     ConversationsListResponse,
     ConversationUpdateResponse,
     ForbiddenResponse,
+    InternalServerErrorResponse,
     NotFoundResponse,
     ServiceUnavailableResponse,
     UnauthorizedResponse,
@@ -41,100 +44,60 @@ from utils.suid import (
 logger = logging.getLogger("app.endpoints.handlers")
 router = APIRouter(tags=["conversations_v3"])
 
-conversation_responses: dict[int | str, dict[str, Any]] = {
-    200: {
-        "model": ConversationResponse,
-        "description": "Conversation retrieved successfully",
-    },
-    400: {
-        "model": BadRequestResponse,
-        "description": "Invalid request",
-    },
-    401: {
-        "model": UnauthorizedResponse,
-        "description": "Unauthorized: Invalid or missing Bearer token",
-    },
-    403: {
-        "model": ForbiddenResponse,
-        "description": "Client does not have permission to access conversation",
-    },
-    404: {
-        "model": NotFoundResponse,
-        "description": "Conversation not found",
-    },
-    503: {
-        "model": ServiceUnavailableResponse,
-        "description": "Service unavailable",
-    },
+conversation_get_responses: dict[int | str, dict[str, Any]] = {
+    200: ConversationResponse.openapi_response(),
+    400: BadRequestResponse.openapi_response(),
+    401: UnauthorizedResponse.openapi_response(
+        examples=["missing header", "missing token"]
+    ),
+    403: ForbiddenResponse.openapi_response(examples=["conversation read", "endpoint"]),
+    404: NotFoundResponse.openapi_response(examples=["conversation"]),
+    500: InternalServerErrorResponse.openapi_response(
+        examples=["database", "configuration"]
+    ),
+    503: ServiceUnavailableResponse.openapi_response(),
 }
 
 conversation_delete_responses: dict[int | str, dict[str, Any]] = {
-    200: {
-        "model": ConversationDeleteResponse,
-        "description": "Conversation deleted successfully",
-    },
-    400: {
-        "model": BadRequestResponse,
-        "description": "Invalid request",
-    },
-    401: {
-        "model": UnauthorizedResponse,
-        "description": "Unauthorized: Invalid or missing Bearer token",
-    },
-    403: {
-        "model": ForbiddenResponse,
-        "description": "Client does not have permission to access conversation",
-    },
-    404: {
-        "model": NotFoundResponse,
-        "description": "Conversation not found",
-    },
-    503: {
-        "model": ServiceUnavailableResponse,
-        "description": "Service unavailable",
-    },
+    200: ConversationDeleteResponse.openapi_response(),
+    400: BadRequestResponse.openapi_response(),
+    401: UnauthorizedResponse.openapi_response(
+        examples=["missing header", "missing token"]
+    ),
+    403: ForbiddenResponse.openapi_response(
+        examples=["conversation delete", "endpoint"]
+    ),
+    404: NotFoundResponse.openapi_response(examples=["conversation"]),
+    500: InternalServerErrorResponse.openapi_response(
+        examples=["database", "configuration"]
+    ),
+    503: ServiceUnavailableResponse.openapi_response(),
 }
 
 conversations_list_responses: dict[int | str, dict[str, Any]] = {
-    200: {
-        "model": ConversationsListResponse,
-        "description": "List of conversations retrieved successfully",
-    },
-    401: {
-        "model": UnauthorizedResponse,
-        "description": "Unauthorized: Invalid or missing Bearer token",
-    },
-    503: {
-        "model": ServiceUnavailableResponse,
-        "description": "Service unavailable",
-    },
+    200: ConversationsListResponse.openapi_response(),
+    401: UnauthorizedResponse.openapi_response(
+        examples=["missing header", "missing token"]
+    ),
+    403: ForbiddenResponse.openapi_response(examples=["endpoint"]),
+    500: InternalServerErrorResponse.openapi_response(
+        examples=["database", "configuration"]
+    ),
+    503: ServiceUnavailableResponse.openapi_response(),
 }
 
 conversation_update_responses: dict[int | str, dict[str, Any]] = {
-    200: {
-        "model": ConversationUpdateResponse,
-        "description": "Topic summary updated successfully",
-    },
-    400: {
-        "model": BadRequestResponse,
-        "description": "Invalid request",
-    },
-    401: {
-        "model": UnauthorizedResponse,
-        "description": "Unauthorized: Invalid or missing Bearer token",
-    },
-    403: {
-        "model": ForbiddenResponse,
-        "description": "Client does not have permission to access conversation",
-    },
-    404: {
-        "model": NotFoundResponse,
-        "description": "Conversation not found",
-    },
-    503: {
-        "model": ServiceUnavailableResponse,
-        "description": "Service unavailable",
-    },
+    200: ConversationUpdateResponse.openapi_response(),
+    400: BadRequestResponse.openapi_response(),
+    401: UnauthorizedResponse.openapi_response(
+        examples=["missing header", "missing token"]
+    ),
+    403: ForbiddenResponse.openapi_response(examples=["endpoint"]),
+    404: NotFoundResponse.openapi_response(examples=["conversation"]),
+    500: InternalServerErrorResponse.openapi_response(
+        examples=["database", "configuration"]
+    ),
+    503: ServiceUnavailableResponse.openapi_response(),
 }
 
 
@@ -235,21 +198,16 @@ async def get_conversations_list_endpoint_handler(
             )
 
             return ConversationsListResponse(conversations=conversations)
-
-        except Exception as e:
+            
+        except SQLAlchemyError as e:
             logger.exception(
                 "Error retrieving conversations for user %s: %s", user_id, e
             )
-            raise HTTPException(
-                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-                detail={
-                    "response": "Unknown error",
-                    "cause": f"Unknown error while getting conversations for user {user_id}",
-                },
-            ) from e
+            response = InternalServerErrorResponse.database_error()
+            raise HTTPException(**response.model_dump()) from e
 
 
-@router.get("/conversations/{conversation_id}", responses=conversation_responses)
+@router.get("/conversations/{conversation_id}", responses=conversation_get_responses)
 @authorize(Action.GET_CONVERSATION)
 async def get_conversation_endpoint_handler(
     request: Request,
@@ -279,12 +237,11 @@ async def get_conversation_endpoint_handler(
     # Validate conversation ID format
     if not check_suid(conversation_id):
         logger.error("Invalid conversation ID format: %s", conversation_id)
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail=BadRequestResponse(
-                resource="conversation", resource_id=conversation_id
-            ).model_dump(),
-        )
+        response = BadRequestResponse(
+            resource="conversation",
+            resource_id=conversation_id
+        ).model_dump()
+        raise HTTPException(**response)
 
     # Normalize the conversation ID for database operations (strip conv_ prefix if present)
     normalized_conv_id = normalize_conversation_id(conversation_id)
@@ -307,24 +264,31 @@ async def get_conversation_endpoint_handler(
             user_id,
             normalized_conv_id,
         )
-        raise HTTPException(
-            status_code=status.HTTP_403_FORBIDDEN,
-            detail=ForbiddenResponse.conversation(
-                action="read",
-                resource_id=normalized_conv_id,
-                user_id=user_id,
-            ).model_dump(),
-        )
+        response = ForbiddenResponse.conversation(
+            action="read",
+            resource_id=normalized_conv_id,
+            user_id=user_id,
+        ).model_dump()
+        raise HTTPException(**response)
 
     # If reached this, user is authorized to retrieve this conversation
     # Note: We check if conversation exists in DB but don't fail if it doesn't,
     # as it might exist in llama-stack but not be persisted yet
-    conversation = retrieve_conversation(normalized_conv_id)
-    if conversation is None:
-        logger.warning(
-            "Conversation %s not found in database, will try llama-stack",
+    try:
+        conversation = retrieve_conversation(normalized_conv_id)
+        if conversation is None:
+            logger.warning(
+                "Conversation %s not found in database, will try llama-stack",
+                normalized_conv_id,
+            )
+    except SQLAlchemyError as e:
+        logger.error(
+            "Database error occurred while retrieving conversation %s: %s",
             normalized_conv_id,
+            str(e),
         )
+        response = InternalServerErrorResponse.database_error()
+        raise HTTPException(**response.model_dump()) from e
 
     logger.info(
         "Retrieving conversation %s using Conversations API", normalized_conv_id
@@ -377,38 +341,17 @@ async def get_conversation_endpoint_handler(
 
     except APIConnectionError as e:
         logger.error("Unable to connect to Llama Stack: %s", e)
-        raise HTTPException(
-            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
-            detail=ServiceUnavailableResponse(
-                backend_name="Llama Stack", cause=str(e)
-            ).model_dump(),
-        ) from e
+        response = ServiceUnavailableResponse(
+            backend_name="Llama Stack", cause=str(e)
+        ).model_dump()
+        raise HTTPException(**response) from e
 
-    except NotFoundError as e:
+    except (NotFoundError, BadRequestError) as e:
         logger.error("Conversation not found: %s", e)
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail=NotFoundResponse(
-                resource="conversation", resource_id=normalized_conv_id
-            ).model_dump(),
-        ) from e
-
-    except HTTPException:
-        raise
-
-    except Exception as e:
-        # Handle case where conversation doesn't exist or other errors
-        logger.exception("Error retrieving conversation %s: %s", normalized_conv_id, e)
-        error_msg = (
-            f"Unknown error while getting conversation {normalized_conv_id} : {e}"
-        )
-        raise HTTPException(
-            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail={
-                "response": "Unknown error",
-                "cause": error_msg,
-            },
-        ) from e
+        response = NotFoundResponse(
+            resource="conversation", resource_id=normalized_conv_id
+        ).model_dump()
+        raise HTTPException(**response) from e
 
 
 @router.delete(
@@ -440,16 +383,16 @@ async def delete_conversation_endpoint_handler(
     # Validate conversation ID format
     if not check_suid(conversation_id):
         logger.error("Invalid conversation ID format: %s", conversation_id)
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail=BadRequestResponse(
-                resource="conversation", resource_id=conversation_id
-            ).model_dump(),
-        )
-
+        response = BadRequestResponse(
+            resource="conversation",
+            resource_id=conversation_id
+        ).model_dump()
+        raise HTTPException(**response)
+        
     # Normalize the conversation ID for database operations (strip conv_ prefix if present)
     normalized_conv_id = normalize_conversation_id(conversation_id)
 
+    # Check if user has access to delete this conversation
     user_id = auth[0]
     if not can_access_conversation(
         normalized_conv_id,
@@ -463,27 +406,33 @@ async def delete_conversation_endpoint_handler(
             user_id,
             normalized_conv_id,
         )
-        raise HTTPException(
-            status_code=status.HTTP_403_FORBIDDEN,
-            detail=ForbiddenResponse.conversation(
-                action="delete",
-                resource_id=normalized_conv_id,
-                user_id=user_id,
-            ).model_dump(),
-        )
+        response = ForbiddenResponse.conversation(
+            action="delete",
+            resource_id=normalized_conv_id,
+            user_id=user_id,
+        ).model_dump()
+        raise HTTPException(**response)
 
     # If reached this, user is authorized to delete this conversation
-    conversation = retrieve_conversation(normalized_conv_id)
-    if conversation is None:
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail=NotFoundResponse(
+    try:
+        conversation = retrieve_conversation(normalized_conv_id)
+        if conversation is None:
+            response = NotFoundResponse(
                 resource="conversation", resource_id=normalized_conv_id
-            ).model_dump(),
+            ).model_dump()
+            raise HTTPException(**response)
+
+    except SQLAlchemyError as e:
+        logger.error(
+            "Database error occurred while retrieving conversation %s.",
+            normalized_conv_id,
         )
+        response = InternalServerErrorResponse.database_error()
+        raise HTTPException(**response.model_dump()) from e
 
     logger.info("Deleting conversation %s using Conversations API", normalized_conv_id)
 
+    delete_response: CDR | None = None
     try:
         # Get Llama Stack client
         client = AsyncLlamaStackClientHolder().get_client()
@@ -492,16 +441,16 @@ async def delete_conversation_endpoint_handler(
         llama_stack_conv_id = to_llama_stack_conversation_id(normalized_conv_id)
 
         # Use Conversations API to delete the conversation
-        await client.conversations.delete(conversation_id=llama_stack_conv_id)
+        delete_response = cast(CDR, await client.conversations.delete(
+            conversation_id=llama_stack_conv_id))
 
         logger.info("Successfully deleted conversation %s", normalized_conv_id)
 
-        # Also delete from local database
-        delete_conversation(conversation_id=normalized_conv_id)
+        deleted = delete_conversation(normalized_conv_id)
 
         return ConversationDeleteResponse(
             conversation_id=normalized_conv_id,
-            deleted=True,
+            deleted=deleted and delete_response.deleted if delete_response else False,
         )
 
     except APIConnectionError as e:
@@ -512,35 +461,25 @@ async def delete_conversation_endpoint_handler(
             ).model_dump(),
         ) from e
 
-    except NotFoundError:
+    except (NotFoundError, BadRequestError):
         # If not found in LlamaStack, still try to delete from local DB
         logger.warning(
             "Conversation %s not found in LlamaStack, cleaning up local DB",
             normalized_conv_id,
         )
-        delete_conversation(conversation_id=normalized_conv_id)
-
+        deleted = delete_conversation(normalized_conv_id)
         return ConversationDeleteResponse(
             conversation_id=normalized_conv_id,
-            deleted=True,
+            deleted=deleted,
         )
-
-    except HTTPException:
-        raise
-
-    except Exception as e:
-        # Handle case where conversation doesn't exist or other errors
-        logger.exception("Error deleting conversation %s: %s", normalized_conv_id, e)
-        error_msg = (
-            f"Unknown error while deleting conversation {normalized_conv_id} : {e}"
+    
+    except SQLAlchemyError as e:
+        logger.error(
+            "Database error occurred while deleting conversation %s.",
+            normalized_conv_id,
         )
-        raise HTTPException(
-            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail={
-                "response": "Unknown error",
-                "cause": error_msg,
-            },
-        ) from e
+        response = InternalServerErrorResponse.database_error()
+        raise HTTPException(**response.model_dump()) from e
 
 
 @router.put("/conversations/{conversation_id}", responses=conversation_update_responses)
@@ -570,12 +509,8 @@ async def update_conversation_endpoint_handler(
     # Validate conversation ID format
     if not check_suid(conversation_id):
         logger.error("Invalid conversation ID format: %s", conversation_id)
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail=BadRequestResponse(
-                resource="conversation", resource_id=conversation_id
-            ).model_dump(),
-        )
+        response = BadRequestResponse(resource="conversation", resource_id=conversation_id).model_dump()
+        raise HTTPException(**response)
 
     # Normalize the conversation ID for database operations (strip conv_ prefix if present)
     normalized_conv_id = normalize_conversation_id(conversation_id)
@@ -593,24 +528,29 @@ async def update_conversation_endpoint_handler(
             user_id,
             normalized_conv_id,
         )
-        raise HTTPException(
-            status_code=status.HTTP_403_FORBIDDEN,
-            detail=ForbiddenResponse.conversation(
-                action="update",
-                resource_id=normalized_conv_id,
-                user_id=user_id,
-            ).model_dump(),
-        )
+        response = ForbiddenResponse.conversation(
+            action="update", 
+            resource_id=normalized_conv_id, 
+            user_id=user_id
+        ).model_dump()
+        raise HTTPException(**response)
 
     # If reached this, user is authorized to update this conversation
-    conversation = retrieve_conversation(normalized_conv_id)
-    if conversation is None:
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail=NotFoundResponse(
+    try:
+        conversation = retrieve_conversation(normalized_conv_id)
+        if conversation is None:
+            response = NotFoundResponse(
                 resource="conversation", resource_id=normalized_conv_id
-            ).model_dump(),
+            ).model_dump()
+            raise HTTPException(**response)
+
+    except SQLAlchemyError as e:
+        logger.error(
+            "Database error occurred while retrieving conversation %s.",
+            normalized_conv_id,
         )
+        response = InternalServerErrorResponse.database_error()
+        raise HTTPException(**response.model_dump()) from e
 
     logger.info(
         "Updating metadata for conversation %s using Conversations API",
@@ -658,34 +598,22 @@ async def update_conversation_endpoint_handler(
         )
 
     except APIConnectionError as e:
-        raise HTTPException(
-            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
-            detail=ServiceUnavailableResponse(
-                backend_name="Llama Stack", cause=str(e)
-            ).model_dump(),
-        ) from e
+        response = ServiceUnavailableResponse(
+            backend_name="Llama Stack", cause=str(e)
+        ).model_dump()
+        raise HTTPException(**response) from e
 
-    except NotFoundError as e:
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail=NotFoundResponse(
-                resource="conversation", resource_id=normalized_conv_id
-            ).model_dump(),
-        ) from e
-
-    except HTTPException:
-        raise
-
-    except Exception as e:
-        # Handle case where conversation doesn't exist or other errors
-        logger.exception("Error updating conversation %s: %s", normalized_conv_id, e)
-        error_msg = (
-            f"Unknown error while updating conversation {normalized_conv_id} : {e}"
+    except (NotFoundError, BadRequestError) as e:
+        logger.error("Conversation not found: %s", e)
+        response = NotFoundResponse(
+            resource="conversation", resource_id=normalized_conv_id
+        ).model_dump()
+        raise HTTPException(**response) from e
+    
+    except SQLAlchemyError as e:
+        logger.error(
+            "Database error occurred while updating conversation %s.",
+            normalized_conv_id,
         )
-        raise HTTPException(
-            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail={
-                "response": "Unknown error",
-                "cause": error_msg,
-            },
-        ) from e
+        response = InternalServerErrorResponse.database_error()
+        raise HTTPException(**response.model_dump()) from e

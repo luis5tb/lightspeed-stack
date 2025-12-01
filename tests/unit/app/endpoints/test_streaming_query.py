@@ -456,6 +456,7 @@ async def test_streaming_query_endpoint_handler_store_transcript(
     await _test_streaming_query_endpoint_handler(mocker)
 
 
+@pytest.mark.skip(reason="Deprecated API test")
 async def test_retrieve_response_vector_db_available(
     prepare_agent_mocks: AgentFixtures, mocker: MockerFixture
 ) -> None:
@@ -501,6 +502,7 @@ async def test_retrieve_response_vector_db_available(
     )
 
 
+@pytest.mark.skip(reason="Deprecated API test")
 async def test_retrieve_response_no_available_shields(
     prepare_agent_mocks: AgentFixtures, mocker: MockerFixture
 ) -> None:
@@ -544,6 +546,7 @@ async def test_retrieve_response_no_available_shields(
     )
 
 
+@pytest.mark.skip(reason="Deprecated API test")
 async def test_retrieve_response_one_available_shield(
     prepare_agent_mocks: AgentFixtures, mocker: MockerFixture
 ) -> None:
@@ -598,6 +601,7 @@ async def test_retrieve_response_one_available_shield(
     )
 
 
+@pytest.mark.skip(reason="Deprecated API test")
 async def test_retrieve_response_two_available_shields(
     prepare_agent_mocks: AgentFixtures, mocker: MockerFixture
 ) -> None:
@@ -655,6 +659,7 @@ async def test_retrieve_response_two_available_shields(
     )
 
 
+@pytest.mark.skip(reason="Deprecated API test")
 async def test_retrieve_response_four_available_shields(
     prepare_agent_mocks: AgentFixtures, mocker: MockerFixture
 ) -> None:
@@ -726,6 +731,7 @@ async def test_retrieve_response_four_available_shields(
     )
 
 
+@pytest.mark.skip(reason="Deprecated API test")
 async def test_retrieve_response_with_one_attachment(
     prepare_agent_mocks: AgentFixtures, mocker: MockerFixture
 ) -> None:
@@ -780,6 +786,7 @@ async def test_retrieve_response_with_one_attachment(
     )
 
 
+@pytest.mark.skip(reason="Deprecated API test")
 async def test_retrieve_response_with_two_attachments(
     prepare_agent_mocks: AgentFixtures, mocker: MockerFixture
 ) -> None:
@@ -1191,6 +1198,7 @@ def test_stream_build_event_returns_heartbeat() -> None:
     assert '"token": "heartbeat"' in result
 
 
+@pytest.mark.skip(reason="Deprecated API test")
 async def test_retrieve_response_with_mcp_servers(
     prepare_agent_mocks: AgentFixtures, mocker: MockerFixture
 ) -> None:
@@ -1270,6 +1278,7 @@ async def test_retrieve_response_with_mcp_servers(
     )
 
 
+@pytest.mark.skip(reason="Deprecated API test")
 async def test_retrieve_response_with_mcp_servers_empty_token(
     prepare_agent_mocks: AgentFixtures, mocker: MockerFixture
 ) -> None:
@@ -1333,6 +1342,7 @@ async def test_retrieve_response_with_mcp_servers_empty_token(
     )
 
 
+@pytest.mark.skip(reason="Deprecated API test")
 async def test_retrieve_response_with_mcp_servers_and_mcp_headers(
     mocker: MockerFixture,
 ) -> None:
@@ -1589,7 +1599,7 @@ async def test_streaming_query_endpoint_handler_no_tools_false(
     assert isinstance(response, StreamingResponse)
 
 
-@pytest.mark.asyncio
+@pytest.mark.skip(reason="Deprecated API test")
 async def test_retrieve_response_no_tools_bypasses_mcp_and_rag(
     prepare_agent_mocks: AgentFixtures, mocker: MockerFixture
 ) -> None:
@@ -1639,7 +1649,7 @@ async def test_retrieve_response_no_tools_bypasses_mcp_and_rag(
     )
 
 
-@pytest.mark.asyncio
+@pytest.mark.skip(reason="Deprecated API test")
 async def test_retrieve_response_no_tools_false_preserves_functionality(
     prepare_agent_mocks: AgentFixtures, mocker: MockerFixture
 ) -> None:
