@@ -7,11 +7,11 @@ from llama_stack_client.lib.agents.types import (
     CompletionMessage as AgentCompletionMessage,
     ToolCall as AgentToolCall,
 )
+from llama_stack_client.types.alpha import ToolExecutionStep
 from llama_stack_client.types.shared.interleaved_content_item import (
     TextContentItem,
     ImageContentItem,
 )
-from llama_stack_client.types.alpha import ToolExecutionStep
 from pydantic import BaseModel
 from models.responses import RAGChunk
 from constants import DEFAULT_RAG_TOOL

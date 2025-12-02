@@ -12,10 +12,9 @@ from fastapi import HTTPException, Request, status
 from litellm.exceptions import RateLimitError
 from llama_stack_client import APIConnectionError
 from llama_stack_client.types import UserMessage  # type: ignore
-from llama_stack_client.types.alpha.agents.turn import Turn
+from llama_stack_client.types.alpha import ToolExecutionStep, ToolResponse
+from llama_stack_client.types.alpha.agents import Turn
 from llama_stack_client.types.shared.interleaved_content_item import TextContentItem
-from llama_stack_client.types.alpha.tool_execution_step import ToolExecutionStep
-from llama_stack_client.types.alpha.tool_response import ToolResponse
 from pydantic import AnyUrl
 from pytest_mock import MockerFixture
 
