@@ -465,7 +465,9 @@ async def test_query_endpoint_handler_v2_success(
         return_value=("llama/m", "m", "p"),
     )
 
-    summary = mocker.Mock(llm_response="ANSWER", tool_calls=[], rag_chunks=[])
+    summary = mocker.Mock(
+        llm_response="ANSWER", tool_calls=[], tool_results=[], rag_chunks=[]
+    )
     token_usage = mocker.Mock(input_tokens=10, output_tokens=20)
     mocker.patch(
         "app.endpoints.query_v2.retrieve_response",
@@ -541,9 +543,14 @@ async def test_query_endpoint_quota_exceeded(
         attachments=[],
     )  # type: ignore
     mock_client = mocker.AsyncMock()
+    mock_client.models.list = mocker.AsyncMock(return_value=[])
     mock_client.responses.create.side_effect = RateLimitError(
         model="gpt-4-turbo", llm_provider="openai", message=""
     )
+    # Mock conversation creation (needed for query_v2)
+    mock_conversation = mocker.Mock()
+    mock_conversation.id = "conv_abc123"
+    mock_client.conversations.create = mocker.AsyncMock(return_value=mock_conversation)
     mocker.patch(
         "app.endpoints.query.select_model_and_provider_id",
         return_value=("openai/gpt-4-turbo", "gpt-4-turbo", "openai"),
@@ -552,6 +559,13 @@ async def test_query_endpoint_quota_exceeded(
     mocker.patch(
         "client.AsyncLlamaStackClientHolder.get_client",
         return_value=mock_client,
+    )
+    mocker.patch("app.endpoints.query.check_tokens_available")
+    mocker.patch("app.endpoints.query.get_session")
+    mocker.patch("app.endpoints.query.is_transcripts_enabled", return_value=False)
+    mocker.patch("app.endpoints.query_v2.get_available_shields", return_value=[])
+    mocker.patch(
+        "app.endpoints.query_v2.prepare_tools_for_responses_api", return_value=None
     )
 
     with pytest.raises(HTTPException) as exc_info:

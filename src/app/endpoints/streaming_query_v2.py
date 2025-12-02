@@ -6,9 +6,10 @@ from typing import Annotated, Any, AsyncIterator, cast
 from fastapi import APIRouter, Depends, Request
 from fastapi.responses import StreamingResponse
 from llama_stack.apis.agents.openai_responses import (
+    OpenAIResponseObject,
     OpenAIResponseObjectStream,
 )
-from llama_stack_client import AsyncLlamaStackClient  # type: ignore
+from llama_stack_client import AsyncLlamaStackClient
 
 from app.endpoints.query import (
     is_transcripts_enabled,
@@ -18,6 +19,7 @@ from app.endpoints.query import (
 from app.endpoints.query_v2 import (
     extract_token_usage_from_responses_api,
     get_topic_summary,
+    parse_referenced_documents_from_responses_api,
     prepare_tools_for_responses_api,
 )
 from app.endpoints.streaming_query import (
@@ -38,7 +40,6 @@ from models.responses import (
     ForbiddenResponse,
     InternalServerErrorResponse,
     NotFoundResponse,
-    PromptTooLongResponse,
     QuotaExceededResponse,
     ServiceUnavailableResponse,
     StreamingQueryResponse,
@@ -49,6 +50,7 @@ from utils.endpoints import (
     cleanup_after_streaming,
     get_system_prompt,
 )
+from utils.quota import consume_tokens, get_available_quotas
 from utils.suid import normalize_conversation_id, to_llama_stack_conversation_id
 from utils.mcp_headers import mcp_headers_dependency
 from utils.shields import detect_shield_violations, get_available_shields
@@ -57,7 +59,7 @@ from utils.transcripts import store_transcript
 from utils.types import ToolCallSummary, TurnSummary
 
 logger = logging.getLogger("app.endpoints.handlers")
-router = APIRouter(tags=["streaming_query_v2"])
+router = APIRouter(tags=["streaming_query_v1"])
 auth_dependency = get_auth_dependency()
 
 streaming_query_v2_responses: dict[int | str, dict[str, Any]] = {
@@ -71,7 +73,7 @@ streaming_query_v2_responses: dict[int | str, dict[str, Any]] = {
     404: NotFoundResponse.openapi_response(
         examples=["conversation", "model", "provider"]
     ),
-    413: PromptTooLongResponse.openapi_response(),
+    # 413: PromptTooLongResponse.openapi_response(),
     422: UnprocessableEntityResponse.openapi_response(),
     429: QuotaExceededResponse.openapi_response(),
     500: InternalServerErrorResponse.openapi_response(examples=["configuration"]),
@@ -234,9 +236,9 @@ def create_responses_response_generator(  # pylint: disable=too-many-locals,too-
 
                 # Check for shield violations in the completed response
                 if latest_response_object:
-                    detect_shield_violations(
-                        getattr(latest_response_object, "output", [])
-                    )
+                    output = getattr(latest_response_object, "output", None)
+                    if output is not None:
+                        detect_shield_violations(output)
 
                 if not emitted_turn_complete:
                     final_message = summary.llm_response or "".join(text_parts)
@@ -271,10 +273,27 @@ def create_responses_response_generator(  # pylint: disable=too-many-locals,too-
             if latest_response_object is not None
             else TokenCounter()
         )
+        consume_tokens(
+            configuration.quota_limiters,
+            context.user_id,
+            input_tokens=token_usage.input_tokens,
+            output_tokens=token_usage.output_tokens,
+        )
+        referenced_documents = parse_referenced_documents_from_responses_api(
+            cast(OpenAIResponseObject, latest_response_object)
+        )
+        available_quotas = get_available_quotas(
+            configuration.quota_limiters, context.user_id
+        )
+        yield stream_end_event(
+            context.metadata_map,
+            token_usage,
+            available_quotas,
+            referenced_documents,
+            media_type,
+        )
 
-        yield stream_end_event(context.metadata_map, summary, token_usage, media_type)
-
-        # Perform cleanup tasks (database and cache operations)
+        # Perform cleanup tasks (database and cache operations))
         await cleanup_after_streaming(
             user_id=context.user_id,
             conversation_id=conv_id,
@@ -302,6 +321,7 @@ def create_responses_response_generator(  # pylint: disable=too-many-locals,too-
     "/streaming_query",
     response_class=StreamingResponse,
     responses=streaming_query_v2_responses,
+    summary="Streaming Query Endpoint Handler V1",
 )
 @authorize(Action.STREAMING_QUERY)
 async def streaming_query_endpoint_handler_v2(  # pylint: disable=too-many-locals
@@ -408,19 +428,15 @@ async def retrieve_response(  # pylint: disable=too-many-locals
     else:
         # No conversation_id provided - create a new conversation first
         logger.debug("No conversation_id provided, creating new conversation")
-        try:
-            conversation = await client.conversations.create(metadata={})
-            llama_stack_conv_id = conversation.id
-            # Use the normalized version
-            conversation_id = normalize_conversation_id(llama_stack_conv_id)
-            logger.info(
-                "Created new conversation with ID: %s (normalized: %s)",
-                llama_stack_conv_id,
-                conversation_id,
-            )
-        except Exception as e:  # pylint: disable=broad-exception-caught
-            logger.error("Failed to create conversation: %s", e)
-            raise
+        conversation = await client.conversations.create(metadata={})
+        llama_stack_conv_id = conversation.id
+        # Use the normalized version
+        conversation_id = normalize_conversation_id(llama_stack_conv_id)
+        logger.info(
+            "Created new conversation with ID: %s (normalized: %s)",
+            llama_stack_conv_id,
+            conversation_id,
+        )
 
     create_params: dict[str, Any] = {
         "input": input_text,
@@ -439,6 +455,8 @@ async def retrieve_response(  # pylint: disable=too-many-locals
     response = await client.responses.create(**create_params)
     response_stream = cast(AsyncIterator[OpenAIResponseObjectStream], response)
 
+    # async for chunk in response_stream:
+    #     logger.error("Chunk: %s", chunk.model_dump_json())
     # Return the normalized conversation_id
     # The response_generator will emit it in the start event
     return response_stream, normalize_conversation_id(conversation_id)

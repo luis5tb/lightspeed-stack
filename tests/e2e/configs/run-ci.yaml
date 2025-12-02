@@ -14,6 +14,78 @@ apis:
 
 providers:
   inference:
+apis:
+- agents                                                                                                       
+- batches                                                                                                      
+- datasetio                                                                                                    
+- eval                                                                                                         
+- files                                                                                                        
+- inference                                                                                                    
+- safety                                                                                                       
+- scoring                                                                                                      
+- telemetry                                                                                                    
+- tool_runtime                                                                                                 
+- vector_io                                                                                                    
+benchmarks: []                                                                                                 
+conversations_store:                                                                                           
+  db_path: /opt/app-root/src/.llama/distributions/starter/conversations.db                                     
+  type: sqlite                                                                                                 
+datasets: []                                                                                                   
+image_name: starter                                                                                            
+inference_store:                                                                                               
+  db_path: /opt/app-root/src/.llama/distributions/starter/inference_store.db                                   
+  type: sqlite                                                                                                 
+metadata_store:                                                                                                
+  db_path: /opt/app-root/src/.llama/distributions/starter/registry.db                                          
+  type: sqlite                                                                                                 
+models: []                                                                                                     
+providers:                                                                                                     
+  agents:                                                                                                      
+  - config:                                                                                                    
+      persistence_store:                                                                                       
+        db_path: /opt/app-root/src/.llama/distributions/starter/agents_store.db                                
+        type: sqlite                                                                                           
+      responses_store:                                                                                         
+        db_path: /opt/app-root/src/.llama/distributions/starter/responses_store.db                             
+        type: sqlite                                                                                           
+    provider_id: meta-reference                                                                                
+    provider_type: inline::meta-reference                                                                      
+  batches:                                                                                                     
+  - config:                                                                                                    
+      kvstore:                                                                                                 
+        db_path: /opt/app-root/src/.llama/distributions/starter/batches.db                                     
+        type: sqlite                                                                                           
+    provider_id: reference                                                                                     
+    provider_type: inline::reference                                                                           
+  datasetio:                                                                                                   
+  - config:                                                                                                    
+      kvstore:                                                                                                 
+        db_path: /opt/app-root/src/.llama/distributions/starter/huggingface_datasetio.db                       
+        type: sqlite                                                                                           
+    provider_id: huggingface                                                                                   
+    provider_type: remote::huggingface                                                                         
+  - config:                                                                                                    
+      kvstore:                                                                                                 
+        db_path: /opt/app-root/src/.llama/distributions/starter/localfs_datasetio.db                           
+        type: sqlite                                                                                           
+    provider_id: localfs                                                                                       
+    provider_type: inline::localfs                                                                             
+  eval:                                                                                                        
+  - config:                                                                                                    
+      kvstore:                                                                                                 
+        db_path: /opt/app-root/src/.llama/distributions/starter/meta_reference_eval.db                         
+        type: sqlite                                                                                           
+    provider_id: meta-reference                                                                                
+    provider_type: inline::meta-reference                                                                      
+  files:                                                                                                       
+  - config:                                                                                                    
+      metadata_store:                                                                                          
+        db_path: /opt/app-root/src/.llama/distributions/starter/files_metadata.db                              
+        type: sqlite                                                                                           
+      storage_dir: /opt/app-root/src/.llama/distributions/starter/files                                        
+    provider_id: meta-reference-files                                                                          
+    provider_type: inline::localfs                                                                             
+  inference:                                                                                                   
   - provider_id: openai
     provider_type: remote::openai
     config:
@@ -153,3 +225,45 @@ vector_stores:
     model_id: all-mpnet-base-v2
 safety:
   default_shield_id: llama-guard
+      allowed_models: 
+        - "gpt-4o"
+  - config: {}                                                                                                 
+    provider_id: sentence-transformers                                                                         
+    provider_type: inline::sentence-transformers                                                                                                                                   
+  safety:                                                                                                      
+  - config:                                                                                                    
+      excluded_categories: []                                                                                  
+    provider_id: llama-guard                                                                                   
+    provider_type: inline::llama-guard                                                                                                                                                
+  scoring:                                                                                                     
+  - config: {}                                                                                                 
+    provider_id: basic                                                                                         
+    provider_type: inline::basic                                                                               
+  - config: {}                                                                                                 
+    provider_id: llm-as-judge                                                                                  
+    provider_type: inline::llm-as-judge                                                                                                                                               
+  telemetry:                                                                                                   
+  - config:                                                                                                    
+      service_name: "\u200B"                                                                                   
+    provider_id: meta-reference                                                                                
+    provider_type: inline::meta-reference                                                                      
+  tool_runtime:                                                                                                                                                                 
+  - config: {}                                                                                                 
+    provider_id: rag-runtime                                                                                   
+    provider_type: inline::rag-runtime                                                                                                                                   
+  vector_io:                                                                                                   
+  - config:                                                                                                    
+      kvstore:                                                                                                 
+        db_path: /opt/app-root/src/.llama/distributions/starter/faiss_store.db                                 
+        type: sqlite                                                                                           
+    provider_id: faiss                                                                                         
+    provider_type: inline::faiss                                                                                                                                                                                                                                                        
+scoring_fns: []                                                                                                
+server:                                                                                                        
+  port: 8321                                                                                                   
+shields: []                                                                                            
+tool_groups:                                                                                                   
+- provider_id: rag-runtime                                                                                     
+  toolgroup_id: builtin::rag                                                                                   
+vector_dbs: []                                                                                                 
+version: 2                                    

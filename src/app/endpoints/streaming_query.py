@@ -9,7 +9,7 @@ from collections.abc import Callable
 from datetime import UTC, datetime
 from typing import Annotated, Any, AsyncGenerator, AsyncIterator, Iterator, cast
 
-from fastapi import APIRouter, Depends, HTTPException, Request
+from fastapi import APIRouter, Depends, Request
 from fastapi.responses import StreamingResponse
 from litellm.exceptions import RateLimitError
 from llama_stack_client import (
@@ -21,6 +21,7 @@ from llama_stack_client.types import UserMessage  # type: ignore
 from llama_stack_client.types.alpha.agents import AgentTurnResponseStreamChunk
 from llama_stack_client.types.shared import ToolCall
 from llama_stack_client.types.shared.interleaved_content_item import TextContentItem
+from openai._exceptions import APIStatusError
 
 import metrics
 from app.endpoints.query import (
@@ -35,6 +36,7 @@ from app.endpoints.query import (
     validate_attachments_metadata,
     validate_conversation_ownership,
 )
+from app.endpoints.query import parse_referenced_documents
 from authentication import get_auth_dependency
 from authentication.interface import AuthTuple
 from authorization.middleware import authorize
@@ -47,6 +49,7 @@ from models.context import ResponseGeneratorContext
 from models.database.conversations import UserConversation
 from models.requests import QueryRequest
 from models.responses import (
+    AbstractErrorResponse,
     ForbiddenResponse,
     InternalServerErrorResponse,
     PromptTooLongResponse,
@@ -58,6 +61,7 @@ from models.responses import (
     UnprocessableEntityResponse,
 )
 from utils.endpoints import (
+    ReferencedDocument,
     check_configuration_loaded,
     cleanup_after_streaming,
     create_rag_chunks_dict,
@@ -66,6 +70,7 @@ from utils.endpoints import (
     validate_model_provider_override,
 )
 from utils.mcp_headers import handle_mcp_headers_with_toolgroups, mcp_headers_dependency
+from utils.quota import get_available_quotas
 from utils.token_counter import TokenCounter, extract_token_usage_from_turn
 from utils.transcripts import store_transcript
 from utils.types import TurnSummary, content_to_str
@@ -141,8 +146,9 @@ def stream_start_event(conversation_id: str) -> str:
 
 def stream_end_event(
     metadata_map: dict,
-    summary: TurnSummary,  # pylint: disable=unused-argument
     token_usage: TokenCounter,
+    available_quotas: dict[str, int],
+    referenced_documents: list[ReferencedDocument],
     media_type: str = MEDIA_TYPE_JSON,
 ) -> str:
     """
@@ -172,28 +178,20 @@ def stream_end_event(
         )
         return f"\n\n---\n\n{ref_docs_string}" if ref_docs_string else ""
 
-    # For JSON media type, we need to create a proper structure
-    # Since we don't have access to summary here, we'll create a basic structure
-    referenced_docs_dict = [
-        {
-            "doc_url": v.get("docs_url"),
-            "doc_title": v.get("title"),
-        }
-        for v in metadata_map.values()
-        if "docs_url" in v and "title" in v
-    ]
+    # Convert ReferencedDocument objects to dicts for JSON serialization
+    # Use mode="json" to ensure AnyUrl is serialized to string (not just model_dump())
+    referenced_docs_dict = [doc.model_dump(mode="json") for doc in referenced_documents]
 
     return format_stream_data(
         {
             "event": "end",
             "data": {
-                "rag_chunks": [],  # TODO(jboos): implement RAG chunks when summary is available
                 "referenced_documents": referenced_docs_dict,
                 "truncated": None,  # TODO(jboos): implement truncated
                 "input_tokens": token_usage.input_tokens,
                 "output_tokens": token_usage.output_tokens,
             },
-            "available_quotas": {},  # TODO(jboos): implement available quotas
+            "available_quotas": available_quotas,
         }
     )
 
@@ -359,6 +357,23 @@ def generic_llm_error(error: Exception, media_type: str) -> str:
             },
         }
     )
+
+
+async def stream_http_error(error: AbstractErrorResponse) -> AsyncGenerator[str, None]:
+    """
+    Yield an SSE-formatted error response for generic LLM or API errors.
+
+    Args:
+        error: An AbstractErrorResponse instance representing the error.
+
+    Yields:
+        str: A Server-Sent Events (SSE) formatted error message containing
+            the serialized error details.
+    """
+    logger.error("Error while obtaining answer for user question")
+    logger.exception(error)
+
+    yield format_stream_data({"event": "error", "data": {**error.detail.model_dump()}})
 
 
 # -----------------------------------
@@ -706,7 +721,9 @@ def create_agent_response_generator(  # pylint: disable=too-many-locals
         chunk_id = 0
         summary = TurnSummary(
             llm_response="No response from the model",
-            tool_calls=[], tool_results=[], rag_chunks=[]
+            tool_calls=[],
+            tool_results=[],
+            rag_chunks=[],
         )
 
         # Determine media type for response formatting
@@ -751,8 +768,19 @@ def create_agent_response_generator(  # pylint: disable=too-many-locals
             if latest_turn is not None
             else TokenCounter()
         )
-
-        yield stream_end_event(context.metadata_map, summary, token_usage, media_type)
+        referenced_documents = (
+            parse_referenced_documents(latest_turn) if latest_turn is not None else []
+        )
+        available_quotas = get_available_quotas(
+            configuration.quota_limiters, context.user_id
+        )
+        yield stream_end_event(
+            context.metadata_map,
+            token_usage,
+            available_quotas,
+            referenced_documents,
+            media_type,
+        )
 
         # Perform cleanup tasks (database and cache operations)
         await cleanup_after_streaming(
@@ -832,12 +860,16 @@ async def streaming_query_endpoint_handler_base(  # pylint: disable=too-many-loc
                 user_id,
                 query_request.conversation_id,
             )
-            response = ForbiddenResponse.conversation(
+            forbidden_error = ForbiddenResponse.conversation(
                 action="read",
                 resource_id=query_request.conversation_id,
                 user_id=user_id,
             )
-            raise HTTPException(**response.model_dump())
+            return StreamingResponse(
+                stream_http_error(forbidden_error),
+                media_type="text/event-stream",
+                status_code=forbidden_error.status_code,
+            )
 
     try:
         # try to get Llama Stack client
@@ -883,42 +915,40 @@ async def streaming_query_endpoint_handler_base(  # pylint: disable=too-many-loc
         return StreamingResponse(
             response_generator(response), media_type="text/event-stream"
         )
-    # connection to Llama Stack server
     except APIConnectionError as e:
-        # Update metrics for the LLM call failure
         metrics.llm_calls_failures_total.inc()
         logger.error("Unable to connect to Llama Stack: %s", e)
-        response = ServiceUnavailableResponse(
+        error_response = ServiceUnavailableResponse(
             backend_name="Llama Stack",
             cause=str(e),
         )
-        raise HTTPException(**response.model_dump()) from e
-
+        return StreamingResponse(
+            stream_http_error(error_response),
+            status_code=error_response.status_code,
+            media_type="text/event-stream",
+        )
     except RateLimitError as e:
         used_model = getattr(e, "model", "")
         if used_model:
-            response = QuotaExceededResponse.model(used_model)
+            error_response = QuotaExceededResponse.model(used_model)
         else:
-            response = QuotaExceededResponse(
+            error_response = QuotaExceededResponse(
                 response="The quota has been exceeded", cause=str(e)
             )
-        raise HTTPException(**response.model_dump()) from e
-
-    except Exception as e:  # pylint: disable=broad-except
-        # Handle other errors with OLS-compatible error response
-        # This broad exception catch is intentional to ensure all errors
-        # are converted to OLS-compatible streaming responses
-        media_type = query_request.media_type or MEDIA_TYPE_JSON
-        error_response = generic_llm_error(e, media_type)
-
-        async def error_generator() -> AsyncGenerator[str, None]:
-            yield error_response
-
-        # Use text/event-stream for SSE-formatted JSON responses, text/plain for plain text
-        content_type = (
-            "text/event-stream" if media_type == MEDIA_TYPE_JSON else "text/plain"
+        return StreamingResponse(
+            stream_http_error(error_response),
+            status_code=error_response.status_code,
+            media_type="text/event-stream",
         )
-        return StreamingResponse(error_generator(), media_type=content_type)
+    except APIStatusError as e:
+        metrics.llm_calls_failures_total.inc()
+        logger.error("API status error: %s", e)
+        error_response = InternalServerErrorResponse.generic()
+        return StreamingResponse(
+            stream_http_error(error_response),
+            status_code=error_response.status_code,
+            media_type=query_request.media_type or MEDIA_TYPE_JSON,
+        )
 
 
 @router.post(

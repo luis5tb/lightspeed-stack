@@ -217,10 +217,12 @@ async def _test_query_endpoint_handler(
             ToolCallSummary(
                 id="123",
                 name="test-tool",
-                args="testing",
-                response="tool response",
+                args={"query": "testing"},
+                type="tool_call",
             )
         ],
+        tool_results=[],
+        rag_chunks=[],
     )
     conversation_id = "00000000-0000-0000-0000-000000000000"
     query = "What is OpenStack?"
@@ -1485,10 +1487,12 @@ async def test_auth_tuple_unpacking_in_query_endpoint_handler(
             ToolCallSummary(
                 id="123",
                 name="test-tool",
-                args="testing",
-                response="tool response",
+                args={"query": "testing"},
+                type="tool_call",
             )
         ],
+        tool_results=[],
+        rag_chunks=[],
     )
     mock_retrieve_response = mocker.patch(
         "app.endpoints.query.retrieve_response",
@@ -1545,10 +1549,12 @@ async def test_query_endpoint_handler_no_tools_true(
             ToolCallSummary(
                 id="123",
                 name="test-tool",
-                args="testing",
-                response="tool response",
+                args={"query": "testing"},
+                type="tool_call",
             )
         ],
+        tool_results=[],
+        rag_chunks=[],
     )
     conversation_id = "00000000-0000-0000-0000-000000000000"
     query = "What is OpenStack?"
@@ -1604,10 +1610,12 @@ async def test_query_endpoint_handler_no_tools_false(
             ToolCallSummary(
                 id="123",
                 name="test-tool",
-                args="testing",
-                response="tool response",
+                args={"query": "testing"},
+                type="tool_call",
             )
         ],
+        tool_results=[],
+        rag_chunks=[],
     )
     conversation_id = "00000000-0000-0000-0000-000000000000"
     query = "What is OpenStack?"
@@ -2274,6 +2282,7 @@ async def test_query_endpoint_quota_exceeded(
         model="gpt-4-turbo",
     )  # type: ignore
     mock_client = mocker.AsyncMock()
+    mock_client.models.list = mocker.AsyncMock(return_value=[])
     mock_agent = mocker.AsyncMock()
     mock_agent.create_turn.side_effect = RateLimitError(
         model="gpt-4-turbo", llm_provider="openai", message=""
@@ -2294,6 +2303,9 @@ async def test_query_endpoint_quota_exceeded(
     mocker.patch(
         "app.endpoints.query.handle_mcp_headers_with_toolgroups", return_value={}
     )
+    mocker.patch("app.endpoints.query.check_tokens_available")
+    mocker.patch("app.endpoints.query.get_session")
+    mocker.patch("app.endpoints.query.is_transcripts_enabled", return_value=False)
 
     with pytest.raises(HTTPException) as exc_info:
         await query_endpoint_handler(
@@ -2321,7 +2333,9 @@ async def test_query_endpoint_generate_topic_summary_default_true(
     mock_config.quota_limiters = []
     mocker.patch("app.endpoints.query.configuration", mock_config)
 
-    summary = TurnSummary(llm_response="Test response", tool_calls=[])
+    summary = TurnSummary(
+        llm_response="Test response", tool_calls=[], tool_results=[], rag_chunks=[]
+    )
     mocker.patch(
         "app.endpoints.query.retrieve_response",
         return_value=(
@@ -2369,7 +2383,9 @@ async def test_query_endpoint_generate_topic_summary_explicit_false(
     mock_config.quota_limiters = []
     mocker.patch("app.endpoints.query.configuration", mock_config)
 
-    summary = TurnSummary(llm_response="Test response", tool_calls=[])
+    summary = TurnSummary(
+        llm_response="Test response", tool_calls=[], tool_results=[], rag_chunks=[]
+    )
     mocker.patch(
         "app.endpoints.query.retrieve_response",
         return_value=(

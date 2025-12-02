@@ -8,8 +8,10 @@ from datetime import UTC, datetime
 from typing import Annotated, Any, Optional, cast
 
 from fastapi import APIRouter, Depends, HTTPException, Request
+from litellm.exceptions import RateLimitError
 from llama_stack_client import (
     APIConnectionError,
+    APIStatusError,
     AsyncLlamaStackClient,  # type: ignore
     Document,
 )
@@ -388,7 +390,6 @@ async def query_endpoint_handler_base(  # pylint: disable=R0914
         response = QueryResponse(
             conversation_id=conversation_id,
             response=summary.llm_response,
-            rag_chunks=summary.rag_chunks if summary.rag_chunks else [],
             tool_calls=summary.tool_calls if summary.tool_calls else None,
             tool_results=summary.tool_results if summary.tool_results else None,
             referenced_documents=referenced_documents,
@@ -411,12 +412,21 @@ async def query_endpoint_handler_base(  # pylint: disable=R0914
         )
         raise HTTPException(**response.model_dump()) from e
     except SQLAlchemyError as e:
-        logger.exception("Error persisting conversation details: %s", e)
+        logger.exception("Error persisting conversation details.")
         response = InternalServerErrorResponse.database_error()
         raise HTTPException(**response.model_dump()) from e
-    except Exception as e:
+    except RateLimitError as e:
         used_model = getattr(e, "model", "")
-        response = QuotaExceededResponse.model(used_model)
+        if used_model:
+            response = QuotaExceededResponse.model(used_model)
+        else:
+            response = QuotaExceededResponse(
+                response="The quota has been exceeded", cause=str(e)
+            )
+        raise HTTPException(**response.model_dump()) from e
+    except APIStatusError as e:
+        logger.exception("Error in query endpoint handler: %s", e)
+        response = InternalServerErrorResponse.generic()
         raise HTTPException(**response.model_dump()) from e
 
 

@@ -311,7 +311,6 @@ async def test_query_v2_endpoint_with_attachments(
 # ==========================================
 
 
-@pytest.mark.skip(reason="LCORE-1025: ToolCallSummary.response type mismatch")
 @pytest.mark.asyncio
 async def test_query_v2_endpoint_with_tool_calls(
     test_config: AppConfig,
@@ -344,13 +343,15 @@ async def test_query_v2_endpoint_with_tool_calls(
     mock_tool_output.id = "call-1"
     mock_tool_output.queries = ["What is Ansible"]
     mock_tool_output.status = "completed"
-    mock_tool_output.results = [
-        mocker.MagicMock(
-            file_id="doc-1",
-            filename="ansible-docs.txt",
-            score=0.95,
-        )
-    ]
+    mock_result = mocker.MagicMock()
+    mock_result.file_id = "doc-1"
+    mock_result.filename = "ansible-docs.txt"
+    mock_result.score = 0.95
+    mock_result.attributes = {
+        "doc_url": "https://example.com/ansible-docs.txt",
+        "link": "https://example.com/ansible-docs.txt",
+    }
+    mock_tool_output.results = [mock_result]
 
     mock_message_output = mocker.MagicMock()
     mock_message_output.type = "message"
@@ -373,10 +374,7 @@ async def test_query_v2_endpoint_with_tool_calls(
 
     assert response.tool_calls is not None
     assert len(response.tool_calls) > 0
-    assert response.tool_calls[0].tool_name == "knowledge_search"
-
-    if response.rag_chunks:
-        assert len(response.rag_chunks) > 0
+    assert response.tool_calls[0].name == "knowledge_search"
 
 
 @pytest.mark.asyncio
@@ -440,10 +438,9 @@ async def test_query_v2_endpoint_with_mcp_list_tools(
 
     assert response.tool_calls is not None
     assert len(response.tool_calls) == 1
-    assert response.tool_calls[0].tool_name == "mcp_list_tools"
+    assert response.tool_calls[0].name == "mcp_list_tools"
 
 
-@pytest.mark.skip(reason="LCORE-1025: ToolCallSummary.response type mismatch")
 @pytest.mark.asyncio
 async def test_query_v2_endpoint_with_multiple_tool_types(
     test_config: AppConfig,
@@ -508,7 +505,7 @@ async def test_query_v2_endpoint_with_multiple_tool_types(
     # Verify response includes multiple tool calls
     assert response.tool_calls is not None
     assert len(response.tool_calls) == 2
-    tool_names = [tc.tool_name for tc in response.tool_calls]
+    tool_names = [tc.name for tc in response.tool_calls]
     assert "knowledge_search" in tool_names or "file_search" in tool_names
     assert "calculate" in tool_names
 
@@ -1205,6 +1202,7 @@ async def test_query_v2_endpoint_transcript_behavior(
     test_request: Request,
     test_auth: AuthTuple,
     patch_db_session: Session,
+    mocker: MockerFixture,
 ) -> None:
     """Test transcript storage behavior based on configuration.
 
@@ -1220,8 +1218,12 @@ async def test_query_v2_endpoint_transcript_behavior(
         test_request: FastAPI request
         test_auth: noop authentication tuple
         patch_db_session: Test database session
+        mocker: pytest-mock fixture
     """
     _ = mock_llama_stack_client
+
+    # Mock store_transcript to prevent file creation
+    mocker.patch("app.endpoints.query.store_transcript")
 
     test_config.user_data_collection_configuration.transcripts_enabled = True
 

@@ -1,12 +1,13 @@
-# pylint: disable=redefined-outer-name, import-error
+# pylint: disable=redefined-outer-name,import-error, too-many-function-args
 """Unit tests for the /streaming_query (v2) endpoint using Responses API."""
 
 from types import SimpleNamespace
 from typing import Any, AsyncIterator
 
 import pytest
-from fastapi import HTTPException, Request, status
+from fastapi import Request, status
 from fastapi.responses import StreamingResponse
+from litellm.exceptions import RateLimitError
 from llama_stack_client import APIConnectionError
 from pytest_mock import MockerFixture
 
@@ -129,7 +130,7 @@ async def test_streaming_query_endpoint_handler_v2_success_yields_events(
     )
     mocker.patch(
         "app.endpoints.streaming_query_v2.stream_end_event",
-        lambda _m, _s, _t, _media: "END\n",
+        lambda _m, _t, _aq, _rd, _media: "END\n",
     )
 
     # Mock the cleanup function that handles all post-streaming database/cache work
@@ -161,7 +162,9 @@ async def test_streaming_query_endpoint_handler_v2_success_yields_events(
             arguments='{"q":"x"}',
         )
         yield SimpleNamespace(type="response.output_text.done", text="Hello world")
-        yield SimpleNamespace(type="response.completed")
+        # Include a response object with output attribute for shield violation detection
+        mock_response = SimpleNamespace(output=[])
+        yield SimpleNamespace(type="response.completed", response=mock_response)
 
     mocker.patch(
         "app.endpoints.streaming_query_v2.retrieve_response",
@@ -222,16 +225,20 @@ async def test_streaming_query_endpoint_handler_v2_api_connection_error(
 
     fail_metric = mocker.patch("metrics.llm_calls_failures_total")
 
-    with pytest.raises(HTTPException) as exc:
-        await streaming_query_endpoint_handler_v2(
-            request=dummy_request,
-            query_request=QueryRequest(query="hi"),
-            auth=("user123", "", False, "tok"),
-            mcp_headers={},
-        )
+    mocker.patch(
+        "app.endpoints.streaming_query.evaluate_model_hints",
+        return_value=(None, None),
+    )
 
-    assert exc.value.status_code == status.HTTP_503_SERVICE_UNAVAILABLE
-    assert "Unable to connect to Llama Stack" in str(exc.value.detail)
+    response = await streaming_query_endpoint_handler_v2(
+        request=dummy_request,
+        query_request=QueryRequest(query="hi"),
+        auth=("user123", "", False, "tok"),
+        mcp_headers={},
+    )
+
+    assert isinstance(response, StreamingResponse)
+    assert response.status_code == status.HTTP_503_SERVICE_UNAVAILABLE
     fail_metric.inc.assert_called_once()
 
 
@@ -341,7 +348,7 @@ async def test_streaming_response_detects_shield_violation(
     )
     mocker.patch(
         "app.endpoints.streaming_query_v2.stream_end_event",
-        lambda _m, _s, _t, _media: "END\n",
+        lambda _m, _t, _aq, _rd, _media: "END\n",
     )
 
     # Mock the cleanup function that handles all post-streaming database/cache work
@@ -433,7 +440,7 @@ async def test_streaming_response_no_shield_violation(
     )
     mocker.patch(
         "app.endpoints.streaming_query_v2.stream_end_event",
-        lambda _m, _s, _t, _media: "END\n",
+        lambda _m, _t, _aq, _rd, _media: "END\n",
     )
 
     # Mock the cleanup function that handles all post-streaming database/cache work
@@ -485,3 +492,81 @@ async def test_streaming_response_no_shield_violation(
 
     # Verify that the validation error metric was NOT incremented
     validation_metric.inc.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_streaming_query_endpoint_handler_v2_quota_exceeded(
+    mocker: MockerFixture, dummy_request: Request
+) -> None:
+    """Test that streaming query endpoint v2 streams HTTP 429 when model quota is exceeded."""
+    mocker.patch("app.endpoints.streaming_query.check_configuration_loaded")
+
+    mock_client = mocker.Mock()
+    mock_client.models.list = mocker.AsyncMock(return_value=[mocker.Mock()])
+    mock_client.responses.create.side_effect = RateLimitError(
+        model="gpt-4-turbo", llm_provider="openai", message=""
+    )
+    # Mock conversation creation (needed for query_v2)
+    mock_conversation = mocker.Mock()
+    mock_conversation.id = "conv_abc123"
+    mock_client.conversations.create = mocker.AsyncMock(return_value=mock_conversation)
+    mock_client.vector_stores.list = mocker.AsyncMock(return_value=mocker.Mock(data=[]))
+    mock_client.shields.list = mocker.AsyncMock(return_value=[])
+
+    mocker.patch(
+        "client.AsyncLlamaStackClientHolder.get_client", return_value=mock_client
+    )
+    mocker.patch(
+        "app.endpoints.streaming_query.evaluate_model_hints",
+        return_value=(None, None),
+    )
+    mocker.patch(
+        "app.endpoints.streaming_query.select_model_and_provider_id",
+        return_value=("openai/gpt-4-turbo", "gpt-4-turbo", "openai"),
+    )
+    mocker.patch("app.endpoints.streaming_query.validate_model_provider_override")
+    mocker.patch(
+        "app.endpoints.streaming_query_v2.get_available_shields", return_value=[]
+    )
+    mocker.patch(
+        "app.endpoints.streaming_query_v2.prepare_tools_for_responses_api",
+        return_value=None,
+    )
+    mocker.patch(
+        "app.endpoints.streaming_query_v2.get_system_prompt", return_value="PROMPT"
+    )
+    mocker.patch(
+        "app.endpoints.streaming_query_v2.to_llama_stack_conversation_id",
+        return_value="conv_abc123",
+    )
+    mocker.patch(
+        "app.endpoints.streaming_query_v2.normalize_conversation_id",
+        return_value="abc123",
+    )
+
+    response = await streaming_query_endpoint_handler_v2(
+        request=dummy_request,
+        query_request=QueryRequest(query="What is OpenStack?"),
+        auth=("user123", "", False, "token-abc"),
+        mcp_headers={},
+    )
+
+    assert isinstance(response, StreamingResponse)
+    assert response.status_code == status.HTTP_429_TOO_MANY_REQUESTS
+
+    # Read the streamed error response (SSE format)
+    content = b""
+    async for chunk in response.body_iterator:
+        if isinstance(chunk, bytes):
+            content += chunk
+        elif isinstance(chunk, str):
+            content += chunk.encode()
+        else:
+            # Handle memoryview or other types
+            content += bytes(chunk)
+
+    content_str = content.decode()
+    # The error is formatted as SSE: data: {"event":"error","response":"...","cause":"..."}\n\n
+    # Check for the error message in the content
+    assert "The model quota has been exceeded" in content_str
+    assert "gpt-4-turbo" in content_str

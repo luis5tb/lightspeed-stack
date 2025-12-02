@@ -34,7 +34,6 @@ from models.responses import (
     ProviderResponse,
     ProvidersListResponse,
     QueryResponse,
-    RAGChunk,
     ReadinessResponse,
     ReferencedDocument,
     ShieldsResponse,
@@ -42,7 +41,7 @@ from models.responses import (
     StreamingQueryResponse,
     ToolsResponse,
 )
-from utils.types import ToolCallSummary
+from utils.types import ToolCallSummary, ToolResultSummary
 
 
 class TestModelsResponse:
@@ -269,8 +268,8 @@ class TestQueryResponse:
         assert isinstance(response_obj, AbstractSuccessfulResponse)
         assert response_obj.response == "Test response"
         assert response_obj.conversation_id is None
-        assert response_obj.rag_chunks == []
         assert response_obj.tool_calls is None
+        assert response_obj.tool_results is None
         assert response_obj.referenced_documents == []
         assert response_obj.truncated is False
         assert response_obj.input_tokens == 0
@@ -279,9 +278,19 @@ class TestQueryResponse:
 
     def test_constructor_full(self) -> None:
         """Test QueryResponse with all fields."""
-        rag_chunks = [RAGChunk(content="chunk1", source="doc1", score=0.9)]
         tool_calls = [
-            ToolCallSummary(id="call-1", name="tool1", args={"arg": "value"}, type="tool_call")
+            ToolCallSummary(
+                id="call-1", name="tool1", args={"arg": "value"}, type="tool_call"
+            )
+        ]
+        tool_results = [
+            ToolResultSummary(
+                id="call-1",
+                status="success",
+                content={"chunks_found": 5},
+                type="tool_result",
+                round=1,
+            )
         ]
         referenced_docs = [
             ReferencedDocument(doc_url=AnyUrl("https://example.com"), doc_title="Doc")
@@ -290,8 +299,8 @@ class TestQueryResponse:
         response = QueryResponse(  # type: ignore[call-arg]
             conversation_id="conv-123",
             response="Test response",
-            rag_chunks=rag_chunks,
             tool_calls=tool_calls,
+            tool_results=tool_results,
             referenced_documents=referenced_docs,
             truncated=True,
             input_tokens=100,
@@ -299,7 +308,6 @@ class TestQueryResponse:
             available_quotas={"daily": 1000},
         )
         assert response.conversation_id == "conv-123"
-        assert response.rag_chunks == rag_chunks
         assert response.tool_calls == tool_calls
         assert response.referenced_documents == referenced_docs
         assert response.truncated is True

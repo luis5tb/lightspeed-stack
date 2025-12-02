@@ -10,7 +10,7 @@ from pydantic_core import SchemaError
 
 from quota.quota_exceed_error import QuotaExceedError
 from models.config import Action, Configuration
-from utils.types import ToolCallSummary, ToolResultSummary, RAGChunk
+from utils.types import ToolCallSummary, ToolResultSummary
 
 SUCCESSFUL_RESPONSE_DESCRIPTION = "Successful response"
 BAD_REQUEST_DESCRIPTION = "Invalid request format"
@@ -366,21 +366,6 @@ class QueryResponse(AbstractSuccessfulResponse):
         ],
     )
 
-    rag_chunks: list[RAGChunk] = Field(
-        [],
-        description="List of RAG chunks used to generate the response",
-    )
-
-    tool_calls: list[ToolCallSummary] | None = Field(
-        None,
-        description="List of tool calls made during response generation",
-    )
-
-    tool_results: list[ToolResultSummary] | None = Field(
-        None,
-        description="List of tool results",
-    )
-
     referenced_documents: list[ReferencedDocument] = Field(
         default_factory=list,
         description="List of documents referenced in generating the response",
@@ -417,6 +402,16 @@ class QueryResponse(AbstractSuccessfulResponse):
         default_factory=dict,
         description="Quota available as measured by all configured quota limiters",
         examples=[{"daily": 1000, "monthly": 50000}],
+    )
+
+    tool_calls: list[ToolCallSummary] | None = Field(
+        None,
+        description="List of tool calls made during response generation",
+    )
+
+    tool_results: list[ToolResultSummary] | None = Field(
+        None,
+        description="List of tool results",
     )
 
     model_config = {

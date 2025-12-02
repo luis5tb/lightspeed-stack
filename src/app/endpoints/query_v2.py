@@ -2,6 +2,7 @@
 
 """Handler for REST API call to provide answer to query using Response API."""
 
+import json
 import logging
 from typing import Annotated, Any, cast
 
@@ -25,7 +26,6 @@ from models.config import Action
 from models.requests import QueryRequest
 from models.responses import (
     ForbiddenResponse,
-    PromptTooLongResponse,
     InternalServerErrorResponse,
     NotFoundResponse,
     QueryResponse,
@@ -48,10 +48,10 @@ from utils.responses import (
 )
 from utils.shields import detect_shield_violations, get_available_shields
 from utils.token_counter import TokenCounter
-from utils.types import ToolCallSummary, TurnSummary
+from utils.types import ToolCallSummary, ToolResultSummary, TurnSummary
 
 logger = logging.getLogger("app.endpoints.handlers")
-router = APIRouter(tags=["query_v2"])
+router = APIRouter(tags=["query_v1"])
 
 query_v2_response: dict[int | str, dict[str, Any]] = {
     200: QueryResponse.openapi_response(),
@@ -64,7 +64,7 @@ query_v2_response: dict[int | str, dict[str, Any]] = {
     404: NotFoundResponse.openapi_response(
         examples=["conversation", "model", "provider"]
     ),
-    413: PromptTooLongResponse.openapi_response(),
+    # 413: PromptTooLongResponse.openapi_response(),
     422: UnprocessableEntityResponse.openapi_response(),
     429: QuotaExceededResponse.openapi_response(),
     500: InternalServerErrorResponse.openapi_response(examples=["configuration"]),
@@ -74,7 +74,7 @@ query_v2_response: dict[int | str, dict[str, Any]] = {
 
 def _build_tool_call_summary(  # pylint: disable=too-many-return-statements,too-many-branches
     output_item: Any,
-) -> ToolCallSummary | None:
+) -> tuple[ToolCallSummary | None, ToolResultSummary | None]:
     """Translate applicable Responses API tool outputs into ``ToolCallSummary`` records.
 
     The OpenAI ``response.output`` array may contain any ``OpenAIResponseOutput`` variant:
@@ -86,23 +86,22 @@ def _build_tool_call_summary(  # pylint: disable=too-many-return-statements,too-
 
     if item_type == "function_call":
         parsed_arguments = getattr(output_item, "arguments", "")
-        status = getattr(output_item, "status", None)
-        if status:
-            if isinstance(parsed_arguments, dict):
-                args: Any = {**parsed_arguments, "status": status}
-            else:
-                args = {"arguments": parsed_arguments, "status": status}
-        else:
+        if isinstance(parsed_arguments, dict):
             args = parsed_arguments
+        else:
+            args = {"arguments": parsed_arguments}
 
         call_id = getattr(output_item, "id", None) or getattr(
             output_item, "call_id", None
         )
-        return ToolCallSummary(
-            id=str(call_id),
-            name=getattr(output_item, "name", "function_call"),
-            args=args,
-            type="tool_call",
+        return (
+            ToolCallSummary(
+                id=str(call_id),
+                name=getattr(output_item, "name", "function_call"),
+                args=args,
+                type="function_call",
+            ),
+            None,
         )
 
     if item_type == "file_search_call":
@@ -111,47 +110,54 @@ def _build_tool_call_summary(  # pylint: disable=too-many-return-statements,too-
             "status": getattr(output_item, "status", None),
         }
         results = getattr(output_item, "results", None)
-        # response_payload: Any | None = None
+        response_payload: Any | None = None
         if results is not None:
             # Store only the essential result metadata to avoid large payloads
-            # response_payload = {
-            #     "results": [
-            #         {
-            #             "file_id": (
-            #                 getattr(result, "file_id", None)
-            #                 if not isinstance(result, dict)
-            #                 else result.get("file_id")
-            #             ),
-            #             "filename": (
-            #                 getattr(result, "filename", None)
-            #                 if not isinstance(result, dict)
-            #                 else result.get("filename")
-            #             ),
-            #             "score": (
-            #                 getattr(result, "score", None)
-            #                 if not isinstance(result, dict)
-            #                 else result.get("score")
-            #             ),
-            #         }
-            #         for result in results
-            #     ]
-            # }
-            ...  # Handle response_payload
+            response_payload = {
+                "results": [
+                    {
+                        "file_id": (
+                            getattr(result, "file_id", None)
+                            if not isinstance(result, dict)
+                            else result.get("file_id")
+                        ),
+                        "filename": (
+                            getattr(result, "filename", None)
+                            if not isinstance(result, dict)
+                            else result.get("filename")
+                        ),
+                        "score": (
+                            getattr(result, "score", None)
+                            if not isinstance(result, dict)
+                            else result.get("score")
+                        ),
+                    }
+                    for result in results
+                ]
+            }
         return ToolCallSummary(
             id=str(getattr(output_item, "id")),
             name=DEFAULT_RAG_TOOL,
             args=args,
-            # response=json.dumps(response_payload) if response_payload else None,
-            type="tool_call",
+            type="file_search_call",
+        ), ToolResultSummary(
+            id=str(getattr(output_item, "id")),
+            status=str(getattr(output_item, "status", None)),
+            content=json.dumps(response_payload) if response_payload else None,
+            type="file_search_call",
+            round=1,
         )
 
     if item_type == "web_search_call":
         args = {"status": getattr(output_item, "status", None)}
-        return ToolCallSummary(
-            id=str(getattr(output_item, "id")),
-            name="web_search",
-            args=args,
-            type="tool_call",
+        return (
+            ToolCallSummary(
+                id=str(getattr(output_item, "id")),
+                name="web_search",
+                args=args,
+                type="web_search_call",
+            ),
+            None,
         )
 
     if item_type == "mcp_call":
@@ -168,8 +174,13 @@ def _build_tool_call_summary(  # pylint: disable=too-many-return-statements,too-
             id=str(getattr(output_item, "id")),
             name=getattr(output_item, "name", "mcp_call"),
             args=args,
-            # response=getattr(output_item, "output", None),
-            type="tool_call",
+            type="mcp_call",
+        ), ToolResultSummary(
+            id=str(getattr(output_item, "id")),
+            status=str(getattr(output_item, "status", None)),
+            content=getattr(output_item, "output", ""),
+            type="mcp_call",
+            round=1,
         )
 
     if item_type == "mcp_list_tools":
@@ -183,12 +194,14 @@ def _build_tool_call_summary(  # pylint: disable=too-many-return-statements,too-
             "server_label": getattr(output_item, "server_label", None),
             "tools": tool_names,
         }
-        return ToolCallSummary(
-            id=str(getattr(output_item, "id")),
-            name="mcp_list_tools",
-            args=args,
-            # response=None,
-            type="tool_call",
+        return (
+            ToolCallSummary(
+                id=str(getattr(output_item, "id")),
+                name="mcp_list_tools",
+                args=args,
+                type="mcp_list_tools",
+            ),
+            None,
         )
 
     if item_type == "mcp_approval_request":
@@ -197,15 +210,17 @@ def _build_tool_call_summary(  # pylint: disable=too-many-return-statements,too-
         server_label = getattr(output_item, "server_label", None)
         if server_label:
             args["server_label"] = server_label
-        return ToolCallSummary(
-            id=str(getattr(output_item, "id")),
-            name=getattr(output_item, "name", "mcp_approval_request"),
-            args=args,
-            # response=None,
-            type="tool_call",
+        return (
+            ToolCallSummary(
+                id=str(getattr(output_item, "id")),
+                name=getattr(output_item, "name", "mcp_approval_request"),
+                args=args,
+                type="tool_call",
+            ),
+            None,
         )
 
-    return None
+    return None, None
 
 
 async def get_topic_summary(  # pylint: disable=too-many-nested-blocks
@@ -246,7 +261,7 @@ async def get_topic_summary(  # pylint: disable=too-many-nested-blocks
     return summary_text.strip() if summary_text else ""
 
 
-@router.post("/query", responses=query_v2_response)
+@router.post("/query", responses=query_v2_response, summary="Query Endpoint Handler V1")
 @authorize(Action.QUERY)
 async def query_endpoint_handler_v2(
     request: Request,
@@ -347,19 +362,15 @@ async def retrieve_response(  # pylint: disable=too-many-locals,too-many-branche
     else:
         # No conversation_id provided - create a new conversation first
         logger.debug("No conversation_id provided, creating new conversation")
-        try:
-            conversation = await client.conversations.create(metadata={})
-            llama_stack_conv_id = conversation.id
-            # Use the normalized version
-            conversation_id = normalize_conversation_id(llama_stack_conv_id)
-            logger.info(
-                "Created new conversation with ID: %s (normalized: %s)",
-                llama_stack_conv_id,
-                conversation_id,
-            )
-        except Exception as e:  # pylint: disable=broad-exception-caught
-            logger.error("Failed to create conversation: %s", e)
-            raise
+        conversation = await client.conversations.create(metadata={})
+        llama_stack_conv_id = conversation.id
+        # Use the normalized version
+        conversation_id = normalize_conversation_id(llama_stack_conv_id)
+        logger.info(
+            "Created new conversation with ID: %s (normalized: %s)",
+            llama_stack_conv_id,
+            conversation_id,
+        )
 
     # Create OpenAI response using responses API
     create_kwargs: dict[str, Any] = {
@@ -378,7 +389,7 @@ async def retrieve_response(  # pylint: disable=too-many-locals,too-many-branche
 
     response = await client.responses.create(**create_kwargs)
     response = cast(OpenAIResponseObject, response)
-
+    logger.info("Response: %s", response)
     logger.debug(
         "Received response with ID: %s, conversation ID: %s, output items: %d",
         response.id,
@@ -389,15 +400,17 @@ async def retrieve_response(  # pylint: disable=too-many-locals,too-many-branche
     # Process OpenAI response format
     llm_response = ""
     tool_calls: list[ToolCallSummary] = []
-
+    tool_results: list[ToolResultSummary] = []
     for output_item in response.output:
         message_text = extract_text_from_response_output_item(output_item)
         if message_text:
             llm_response += message_text
 
-        tool_summary = _build_tool_call_summary(output_item)
-        if tool_summary:
-            tool_calls.append(tool_summary)
+        tool_call, tool_result = _build_tool_call_summary(output_item)
+        if tool_call:
+            tool_calls.append(tool_call)
+        if tool_result:
+            tool_results.append(tool_result)
 
     # Check for shield violations across all output items
     detect_shield_violations(response.output)
@@ -411,7 +424,7 @@ async def retrieve_response(  # pylint: disable=too-many-locals,too-many-branche
     summary = TurnSummary(
         llm_response=llm_response,
         tool_calls=tool_calls,
-        tool_results=[],
+        tool_results=tool_results,
         rag_chunks=[],
     )
 
