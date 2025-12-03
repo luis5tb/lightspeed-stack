@@ -65,19 +65,19 @@ def compare_versions(version_info: str, minimal: str, maximal: str) -> None:
             "Failed to extract version pattern from '%s'. Skipping version check.",
             version_info,
         )
-        return
+        raise InvalidLlamaStackVersionException(
+            f"Failed to extract version pattern from '{version_info}'. Skipping version check."
+        )
 
     normalized_version = match.group(0)
 
     try:
         current_version = Version.parse(normalized_version)
-    except ValueError:
-        logger.warning(
-            "Failed to parse Llama Stack version '%s' (extracted: '%s'). Skipping version check.",
-            version_info,
-            normalized_version,
-        )
-        return
+    except ValueError as e:
+        logger.warning("Failed to parse Llama Stack version '%s'.", version_info)
+        raise InvalidLlamaStackVersionException(
+            f"Failed to parse Llama Stack version '{version_info}'."
+        ) from e
 
     minimal_version = Version.parse(minimal)
     maximal_version = Version.parse(maximal)
