@@ -107,6 +107,7 @@ Scenario: Check if LLM responds for query request with error for missing query
      Then The status code of the response is 422
       And The body of the response contains Value error, Provider must be specified if model is specified
 
+  @skip-in-library-mode
   Scenario: Check if LLM responds for query request with error for missing provider
     Given The system is in default state
     And The llama-stack connection is disrupted

@@ -129,6 +129,7 @@ Feature: conversations endpoint API tests
      }
      """
 
+  @skip-in-library-mode
   Scenario: Check if conversations/{conversation_id} GET endpoint fails when llama-stack is unavailable
     Given The system is in default state
     And I set the Authorization header to Bearer eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiIxMjM0NTY3ODkwIiwibmFtZSI6Ikpva
@@ -177,6 +178,7 @@ Feature: conversations endpoint API tests
      Then The status code of the response is 404
      And The body of the response contains Conversation not found
 
+  @skip-in-library-mode
   Scenario: Check if conversations/{conversation_id} DELETE endpoint fails when llama-stack is unavailable
     Given The system is in default state
     And I set the Authorization header to Bearer eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiIxMjM0NTY3ODkwIiwibmFtZSI6Ikpva

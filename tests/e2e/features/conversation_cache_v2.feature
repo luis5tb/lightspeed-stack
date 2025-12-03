@@ -188,7 +188,7 @@ Feature: Conversation Cache V2 API tests
      Then The status code of the response is 404
      And The body of the response contains Conversation not found
 
-
+  @skip-in-library-mode
   Scenario: Check conversations/{conversation_id} works when llama-stack is down
     Given REST API service prefix is /v1
     And I set the Authorization header to Bearer eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiIxMjM0NTY3ODkwIiwibmFtZSI6Ikpva
@@ -283,7 +283,7 @@ Feature: Conversation Cache V2 API tests
      Then The status code of the response is 404
      And The body of the response contains Conversation not found
 
-
+  @skip-in-library-mode
   Scenario: V2 conversations DELETE endpoint works even when llama-stack is down
     Given REST API service prefix is /v1
     And I set the Authorization header to Bearer eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiIxMjM0NTY3ODkwIiwibmFtZSI6Ikpva

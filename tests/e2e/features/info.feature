@@ -18,6 +18,7 @@ Feature: Info tests
       And The body of the response has proper name Lightspeed Core Service (LCS) and version 0.3.0
       And The body of the response has llama-stack version 0.2.22
 
+  @skip-in-library-mode
   Scenario: Check if info endpoint reports error when llama-stack connection is not working
     Given The system is in default state
     And  The llama-stack connection is disrupted
@@ -35,6 +36,7 @@ Feature: Info tests
       And The body of the response has proper model structure
 
 
+  @skip-in-library-mode
   Scenario: Check if models endpoint reports error when llama-stack in unreachable
     Given The system is in default state
     And  The llama-stack connection is disrupted
@@ -52,6 +54,7 @@ Feature: Info tests
       And The body of the response has proper shield structure
 
 
+  @skip-in-library-mode
   Scenario: Check if shields endpoint reports error when llama-stack in unreachable
     Given The system is in default state
     And  The llama-stack connection is disrupted
@@ -108,6 +111,7 @@ Feature: Info tests
       """
 
 
+  @skip-in-library-mode
   Scenario: Check if tools endpoint reports error when llama-stack in unreachable
     Given The system is in default state
     And  The llama-stack connection is disrupted
