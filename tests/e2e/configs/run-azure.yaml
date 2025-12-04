@@ -34,6 +34,10 @@ models:
   provider_model_id: sentence-transformers/all-mpnet-base-v2
   metadata:
     embedding_dimension: 768
+- model_id: gpt-4o-mini
+  provider_id: azure
+  model_type: llm
+  provider_model_id: gpt-4o-mini
 
 providers:
   agents:
