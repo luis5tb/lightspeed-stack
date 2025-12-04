@@ -108,46 +108,59 @@ def simplify_conversation_items(items: list[dict]) -> list[dict[str, Any]]:
 
     Args:
         items: The full conversation items list from llama-stack Conversations API
+            (in reverse chronological order, newest first)
 
     Returns:
         Simplified items with only essential message and tool call information
+        (in chronological order, oldest first, grouped by turns)
     """
+    # Filter only message type items
+    message_items = [item for item in items if item.get("type") == "message"]
+
+    # Process from bottom up (reverse to get chronological order)
+    # Assume items are grouped correctly: user input followed by assistant output
+    reversed_messages = list(reversed(message_items))
+
     chat_history = []
+    i = 0
+    while i < len(reversed_messages):
+        # Extract text content from user message
+        user_item = reversed_messages[i]
+        user_content = user_item.get("content", [])
+        user_text = ""
+        for content_part in user_content:
+            if isinstance(content_part, dict):
+                content_type = content_part.get("type")
+                if content_type == "input_text":
+                    user_text += content_part.get("text", "")
+            elif isinstance(content_part, str):
+                user_text += content_part
 
-    # Group items by turns (user message -> assistant response)
-    current_turn: dict[str, Any] = {"messages": []}
-    for item in items:
-        item_type = item.get("type")
-        item_role = item.get("role")
-
-        # Handle message items
-        if item_type == "message":
-            content = item.get("content", [])
-
-            # Extract text content from content array
-            text_content = ""
-            for content_part in content:
+        # Extract text content from assistant message (next item)
+        assistant_text = ""
+        if i + 1 < len(reversed_messages):
+            assistant_item = reversed_messages[i + 1]
+            assistant_content = assistant_item.get("content", [])
+            for content_part in assistant_content:
                 if isinstance(content_part, dict):
                     content_type = content_part.get("type")
-                    if content_type in ("input_text", "output_text", "text"):
-                        text_content += content_part.get("text", "")
+                    if content_type == "output_text":
+                        assistant_text += content_part.get("text", "")
                 elif isinstance(content_part, str):
-                    text_content += content_part
+                    assistant_text += content_part
 
-            message = {
-                "content": text_content,
-                "type": item_role,
+        # Create turn with user message first, then assistant message
+        chat_history.append(
+            {
+                "messages": [
+                    {"content": user_text, "type": "user"},
+                    {"content": assistant_text, "type": "assistant"},
+                ]
             }
-            current_turn["messages"].append(message)
+        )
 
-            # If this is an assistant message, it marks the end of a turn
-            if item_role == "assistant" and current_turn["messages"]:
-                chat_history.append(current_turn)
-                current_turn = {"messages": []}
-
-    # Add any remaining turn
-    if current_turn["messages"]:
-        chat_history.append(current_turn)
+        # Move to next pair (skip both user and assistant)
+        i += 2
 
     return chat_history
 
@@ -319,10 +332,10 @@ async def get_conversation_endpoint_handler(
         # Use Conversations API to retrieve conversation items
         conversation_items_response = await client.conversations.items.list(
             conversation_id=llama_stack_conv_id,
-            after=NOT_GIVEN,  # No pagination cursor
-            include=NOT_GIVEN,  # Include all available data
-            limit=1000,  # Max items to retrieve
-            order="asc",  # Get items in chronological order
+            after=NOT_GIVEN,
+            include=NOT_GIVEN,
+            limit=NOT_GIVEN,
+            order=NOT_GIVEN,
         )
         items = (
             conversation_items_response.data
@@ -340,7 +353,6 @@ async def get_conversation_endpoint_handler(
             len(items_dicts),
             conversation_id,
         )
-
         # Simplify the conversation items to include only essential information
         chat_history = simplify_conversation_items(items_dicts)
 
