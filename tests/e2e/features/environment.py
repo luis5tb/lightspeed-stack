@@ -125,7 +125,7 @@ def after_scenario(context: Context, scenario: Scenario) -> None:
 
             # Wait for the service to be healthy
             print("Restoring Llama Stack connection...")
-            time.sleep(5)
+            time.sleep(20)
 
             # Check if it's healthy
             for attempt in range(6):  # Try for 30 seconds
