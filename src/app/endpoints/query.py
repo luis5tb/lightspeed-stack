@@ -13,7 +13,6 @@ from llama_stack_client import (
     APIConnectionError,
     APIStatusError,
     AsyncLlamaStackClient,  # type: ignore
-    Document,
 )
 from llama_stack_client.types import Shield, UserMessage  # type: ignore
 from llama_stack_client.types.alpha import ToolExecutionStep

@@ -829,6 +829,10 @@ async def test_retrieve_response_parses_referenced_documents(
     response_obj.usage = None
 
     mock_client.responses.create = mocker.AsyncMock(return_value=response_obj)
+    # Mock conversations.create for new conversation creation
+    mock_conversation = mocker.Mock()
+    mock_conversation.id = "conv_abc123def456"
+    mock_client.conversations.create = mocker.AsyncMock(return_value=mock_conversation)
     mock_vector_stores = mocker.Mock()
     mock_vector_stores.data = []
     mock_client.vector_stores.list = mocker.AsyncMock(return_value=mock_vector_stores)

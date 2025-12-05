@@ -2,6 +2,8 @@
 
 """Unit tests for functions defined in authentication/api_key_token.py"""
 
+from typing import Any
+
 from fastapi import Request, HTTPException
 import pytest
 from pydantic import SecretStr
@@ -71,7 +73,8 @@ async def test_api_key_with_token_auth_dependency_no_token(
         await dependency(request)
 
     assert exc_info.value.status_code == 401
-    assert exc_info.value.detail["cause"] == "No Authorization header found"
+    detail: dict[str, Any] = exc_info.value.detail  # type: ignore[assignment]
+    assert detail["cause"] == "No Authorization header found"
 
 
 async def test_api_key_with_token_auth_dependency_no_bearer(
@@ -94,7 +97,8 @@ async def test_api_key_with_token_auth_dependency_no_bearer(
         await dependency(request)
 
     assert exc_info.value.status_code == 401
-    assert exc_info.value.detail["cause"] == "No token found in Authorization header"
+    detail: dict[str, Any] = exc_info.value.detail  # type: ignore[assignment]
+    assert detail["cause"] == "No token found in Authorization header"
 
 
 async def test_api_key_with_token_auth_dependency_invalid(

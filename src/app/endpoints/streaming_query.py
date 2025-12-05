@@ -15,7 +15,6 @@ from litellm.exceptions import RateLimitError
 from llama_stack_client import (
     APIConnectionError,
     AsyncLlamaStackClient,  # type: ignore
-    Document,
 )
 from llama_stack_client.types import UserMessage  # type: ignore
 from llama_stack_client.types.alpha.agents import AgentTurnResponseStreamChunk
