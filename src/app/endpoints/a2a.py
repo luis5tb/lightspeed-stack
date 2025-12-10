@@ -11,6 +11,7 @@ from fastapi import APIRouter, Depends, HTTPException, Request, status
 from llama_stack.apis.agents.openai_responses import (
     OpenAIResponseObjectStream,
 )
+from llama_stack_client import APIConnectionError
 from starlette.responses import Response, StreamingResponse
 
 from a2a.types import (
@@ -310,19 +311,44 @@ class A2AAgentExecutor(AgentExecutor):
 
         # Get LLM client and select model
         client = AsyncLlamaStackClientHolder().get_client()
-        llama_stack_model_id, _model_id, _provider_id = select_model_and_provider_id(
-            await client.models.list(),
-            *evaluate_model_hints(user_conversation=None, query_request=query_request),
-        )
+        try:
+            llama_stack_model_id, _model_id, _provider_id = (
+                select_model_and_provider_id(
+                    await client.models.list(),
+                    *evaluate_model_hints(
+                        user_conversation=None, query_request=query_request
+                    ),
+                )
+            )
 
-        # Stream response from LLM using the Responses API
-        stream, conversation_id = await retrieve_response(
-            client,
-            llama_stack_model_id,
-            query_request,
-            self.auth_token,
-            mcp_headers=self.mcp_headers,
-        )
+            # Stream response from LLM using the Responses API
+            stream, conversation_id = await retrieve_response(
+                client,
+                llama_stack_model_id,
+                query_request,
+                self.auth_token,
+                mcp_headers=self.mcp_headers,
+            )
+        except APIConnectionError as e:
+            error_message = (
+                f"Unable to connect to Llama Stack backend service: {str(e)}. "
+                "The service may be temporarily unavailable. Please try again later."
+            )
+            logger.error(
+                "APIConnectionError in A2A request: %s",
+                str(e),
+                exc_info=True,
+            )
+            await task_updater.update_status(
+                TaskState.failed,
+                message=new_agent_text_message(
+                    error_message,
+                    context_id=context_id,
+                    task_id=task_id,
+                ),
+                final=True,
+            )
+            return
 
         # Persist conversation_id for next turn in same A2A context
         if conversation_id:

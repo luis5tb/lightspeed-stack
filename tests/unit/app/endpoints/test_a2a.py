@@ -6,8 +6,10 @@
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock
 
+import httpx
 import pytest
 from fastapi import HTTPException, Request
+from llama_stack_client import APIConnectionError
 from pytest_mock import MockerFixture
 
 from a2a.types import (
@@ -653,6 +655,145 @@ class TestA2AAgentExecutor:
         task_updater.update_status.assert_called_once()
         call_args = task_updater.update_status.call_args
         assert call_args[0][0] == TaskState.input_required
+
+    @pytest.mark.asyncio
+    async def test_process_task_streaming_handles_api_connection_error_on_models_list(
+        self,
+        mocker: MockerFixture,
+        setup_configuration: AppConfig,  # pylint: disable=unused-argument
+    ) -> None:
+        """Test _process_task_streaming handles APIConnectionError from models.list()."""
+        executor = A2AAgentExecutor(auth_token="test-token")
+
+        # Mock the context with valid input
+        mock_message = MagicMock()
+        mock_message.role = "user"
+        mock_message.parts = [Part(root=TextPart(text="Hello"))]
+        mock_message.metadata = {}
+
+        context = MagicMock(spec=RequestContext)
+        context.task_id = "task-123"
+        context.context_id = "ctx-456"
+        context.message = mock_message
+        context.get_user_input.return_value = "Hello"
+
+        # Mock event queue
+        event_queue = AsyncMock(spec=EventQueue)
+
+        # Create task updater mock
+        task_updater = MagicMock()
+        task_updater.update_status = AsyncMock()
+        task_updater.event_queue = event_queue
+
+        # Mock the context store
+        mock_context_store = AsyncMock()
+        mock_context_store.get.return_value = None
+        mocker.patch(
+            "app.endpoints.a2a._get_context_store", return_value=mock_context_store
+        )
+
+        # Mock the client to raise APIConnectionError on models.list()
+        mock_client = AsyncMock()
+        # Create a mock httpx.Request for APIConnectionError
+        mock_request = httpx.Request("GET", "http://test-llama-stack/models")
+        mock_client.models.list.side_effect = APIConnectionError(
+            message="Connection refused: unable to reach Llama Stack",
+            request=mock_request,
+        )
+        mocker.patch(
+            "app.endpoints.a2a.AsyncLlamaStackClientHolder"
+        ).return_value.get_client.return_value = mock_client
+
+        await executor._process_task_streaming(
+            context, task_updater, context.task_id, context.context_id
+        )
+
+        # Verify failure status was sent
+        task_updater.update_status.assert_called_once()
+        call_args = task_updater.update_status.call_args
+        assert call_args[0][0] == TaskState.failed
+        assert call_args[1]["final"] is True
+        # Verify error message contains helpful info
+        error_message = call_args[1]["message"]
+        assert "Unable to connect to Llama Stack backend service" in str(error_message)
+
+    @pytest.mark.asyncio
+    async def test_process_task_streaming_handles_api_connection_error_on_retrieve_response(
+        self,
+        mocker: MockerFixture,
+        setup_configuration: AppConfig,  # pylint: disable=unused-argument
+    ) -> None:
+        """Test _process_task_streaming handles APIConnectionError from retrieve_response()."""
+        executor = A2AAgentExecutor(auth_token="test-token")
+
+        # Mock the context with valid input
+        mock_message = MagicMock()
+        mock_message.role = "user"
+        mock_message.parts = [Part(root=TextPart(text="Hello"))]
+        mock_message.metadata = {}
+
+        context = MagicMock(spec=RequestContext)
+        context.task_id = "task-123"
+        context.context_id = "ctx-456"
+        context.message = mock_message
+        context.get_user_input.return_value = "Hello"
+
+        # Mock event queue
+        event_queue = AsyncMock(spec=EventQueue)
+
+        # Create task updater mock
+        task_updater = MagicMock()
+        task_updater.update_status = AsyncMock()
+        task_updater.event_queue = event_queue
+
+        # Mock the context store
+        mock_context_store = AsyncMock()
+        mock_context_store.get.return_value = None
+        mocker.patch(
+            "app.endpoints.a2a._get_context_store", return_value=mock_context_store
+        )
+
+        # Mock the client to succeed on models.list()
+        mock_client = AsyncMock()
+        mock_models = MagicMock()
+        mock_models.models = []
+        mock_client.models.list.return_value = mock_models
+        mocker.patch(
+            "app.endpoints.a2a.AsyncLlamaStackClientHolder"
+        ).return_value.get_client.return_value = mock_client
+
+        # Mock select_model_and_provider_id
+        mocker.patch(
+            "app.endpoints.a2a.select_model_and_provider_id",
+            return_value=("model-id", "model-id", "provider-id"),
+        )
+
+        # Mock evaluate_model_hints
+        mocker.patch(
+            "app.endpoints.a2a.evaluate_model_hints", return_value=(None, None)
+        )
+
+        # Mock retrieve_response to raise APIConnectionError
+        mock_request = httpx.Request("POST", "http://test-llama-stack/responses")
+        mocker.patch(
+            "app.endpoints.a2a.retrieve_response",
+            side_effect=APIConnectionError(
+                message="Connection timeout during streaming", request=mock_request
+            ),
+        )
+
+        await executor._process_task_streaming(
+            context, task_updater, context.task_id, context.context_id
+        )
+
+        # Verify failure status was sent
+        task_updater.update_status.assert_called_once()
+        call_args = task_updater.update_status.call_args
+        assert call_args[0][0] == TaskState.failed
+        assert call_args[1]["final"] is True
+        # Verify error message contains helpful info
+        error_message = call_args[1]["message"]
+        assert "Unable to connect to Llama Stack backend service" in str(error_message)
 
     @pytest.mark.asyncio
     async def test_cancel_raises_not_implemented(self) -> None:
