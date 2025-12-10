@@ -352,7 +352,7 @@ class TestGetLightspeedAgentCard:
         assert agent_card.name == "Test Agent"
         assert agent_card.description == "A test agent"
         assert agent_card.url == "http://localhost:8080/a2a"
-        assert agent_card.protocol_version == "0.2.1"
+        assert agent_card.protocol_version == "0.3.0"  # Default protocol version
 
         # Check provider
         assert agent_card.provider is not None
@@ -366,6 +366,63 @@ class TestGetLightspeedAgentCard:
         # Check capabilities
         assert agent_card.capabilities is not None
         assert agent_card.capabilities.streaming is True
+
+    def test_get_agent_card_with_custom_protocol_version(
+        self, mocker: MockerFixture
+    ) -> None:
+        """Test getting agent card with custom protocol version."""
+        config_dict: dict[Any, Any] = {
+            "name": "test",
+            "service": {
+                "host": "localhost",
+                "port": 8080,
+                "auth_enabled": False,
+                "base_url": "http://localhost:8080",
+            },
+            "llama_stack": {
+                "api_key": "test-key",
+                "url": "http://test.com:1234",
+                "use_as_library_client": False,
+            },
+            "user_data_collection": {},
+            "mcp_servers": [],
+            "customization": {
+                "agent_card_config": {
+                    "name": "Test Agent",
+                    "description": "A test agent",
+                    "protocolVersion": "0.2.1",  # Custom protocol version
+                    "provider": {
+                        "organization": "Test Org",
+                        "url": "https://test.org",
+                    },
+                    "skills": [
+                        {
+                            "id": "test-skill",
+                            "name": "Test Skill",
+                            "description": "A test skill",
+                            "tags": ["test"],
+                            "inputModes": ["text/plain"],
+                            "outputModes": ["text/plain"],
+                        }
+                    ],
+                    "capabilities": {
+                        "streaming": True,
+                        "pushNotifications": False,
+                        "stateTransitionHistory": False,
+                    },
+                }
+            },
+            "authentication": {"module": "noop"},
+            "authorization": {"access_rules": []},
+            "a2a_state": {},
+        }
+        cfg = AppConfig()
+        cfg.init_from_dict(config_dict)
+        mocker.patch("app.endpoints.a2a.configuration", cfg)
+
+        agent_card = get_lightspeed_agent_card()
+
+        assert agent_card.protocol_version == "0.2.1"  # Custom version used
 
     def test_get_agent_card_without_config_raises_error(
         self,

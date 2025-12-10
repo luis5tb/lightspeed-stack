@@ -584,7 +584,7 @@ def get_lightspeed_agent_card() -> AgentCard:
         default_input_modes=config.get("defaultInputModes", ["text/plain"]),
         default_output_modes=config.get("defaultOutputModes", ["text/plain"]),
         capabilities=capabilities,
-        protocol_version="0.2.1",
+        protocol_version=config.get("protocolVersion", "0.3.0"),
         security=config.get("security", [{"bearer": []}]),
         security_schemes=config.get("security_schemes", {}),
     )
@@ -845,6 +845,6 @@ async def a2a_health_check() -> dict[str, str]:
         "status": "healthy",
         "service": "lightspeed-a2a",
         "version": __version__,
-        "a2a_sdk_version": "0.2.1",
-        "timestamp": datetime.now().isoformat(),
+        "a2a_sdk_version": "0.3.4",
+        "timestamp": datetime.now(timezone.utc).isoformat(),
     }

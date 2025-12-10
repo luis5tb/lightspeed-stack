@@ -86,6 +86,7 @@ Create a separate `agent_card.yaml` file with the agent card configuration:
 # agent_card.yaml
 name: "Lightspeed AI Assistant"
 description: "An AI assistant for OpenShift and Kubernetes"
+protocolVersion: "0.3.0"  # A2A protocol version (default: "0.3.0")
 provider:
   organization: "Red Hat"
   url: "https://redhat.com"
@@ -128,6 +129,7 @@ customization:
   agent_card_config:
     name: "My AI Assistant"
     description: "An AI assistant for helping with various tasks"
+    protocolVersion: "0.3.0"  # A2A protocol version (default: "0.3.0")
     provider:
       organization: "My Organization"
       url: "https://myorg.example.com"
@@ -266,7 +268,7 @@ The agent card describes the agent's capabilities:
   "version": "1.0.0",
   "url": "https://example.com/a2a",
   "documentation_url": "https://example.com/docs",
-  "protocol_version": "0.2.1",
+  "protocol_version": "0.3.0",
   "provider": {
     "organization": "Red Hat",
     "url": "https://redhat.com"
@@ -297,6 +299,8 @@ The agent card describes the agent's capabilities:
   }
 }
 ```
+
+**Note:** The `protocol_version` field can be configured via the `protocolVersion` setting in your agent card configuration (see [Agent Card Configuration](#agent-card-configuration) section above).
 
 ## How the Executor Works
 
@@ -710,7 +714,16 @@ Check logs for entries from `app.endpoints.handlers` logger.
 
 ## Protocol Version
 
-This implementation supports A2A protocol version **0.2.1**.
+The A2A protocol version can be configured in the agent card configuration file using the `protocolVersion` field. If not specified, it defaults to **0.3.0**.
+
+To set a specific protocol version, add it to your agent card configuration:
+
+```yaml
+# In agent_card.yaml or customization.agent_card_config
+protocolVersion: "0.3.0"
+```
+
+The protocol version is included in the agent card response and indicates which version of the A2A protocol specification the agent implements.
 
 ## References
 
