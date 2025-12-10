@@ -48,6 +48,9 @@ dependencies = [
     "openai>=1.99.9",
     # Used by database interface
     "sqlalchemy>=2.0.42",
+    # Async database drivers for A2A persistent storage
+    "aiosqlite>=0.21.0",
+    "asyncpg>=0.31.0",
     # Used by Llama Stack version checker
     "semver<4.0.0",
     # Used by authorization resolvers

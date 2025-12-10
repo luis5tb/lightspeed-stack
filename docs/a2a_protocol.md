@@ -15,7 +15,7 @@ The A2A protocol is an open standard for agent-to-agent communication that allow
 
 ## Architecture
 
-```
+```text
 ┌─────────────────────────────────────────────────────────────────┐
 │                        A2A Client                               │
 │                  (A2A Inspector, Other Agents)                  │
@@ -69,7 +69,59 @@ The A2A protocol is an open standard for agent-to-agent communication that allow
 
 ### Agent Card Configuration
 
-The agent card is configured via the `customization.agent_card_config` section in your configuration file:
+The agent card can be configured in two ways:
+
+#### Option 1: External YAML File (Recommended)
+
+Reference an external agent card configuration file using `customization.agent_card_path`:
+
+```yaml
+customization:
+  agent_card_path: agent_card.yaml
+```
+
+Create a separate `agent_card.yaml` file with the agent card configuration:
+
+```yaml
+# agent_card.yaml
+name: "Lightspeed AI Assistant"
+description: "An AI assistant for OpenShift and Kubernetes"
+provider:
+  organization: "Red Hat"
+  url: "https://redhat.com"
+skills:
+  - id: "openshift-qa"
+    name: "OpenShift Q&A"
+    description: "Answer questions about OpenShift and Kubernetes"
+    tags: ["openshift", "kubernetes", "containers"]
+    inputModes: ["text/plain"]
+    outputModes: ["text/plain"]
+    examples:
+      - "How do I create a deployment in OpenShift?"
+      - "What is a pod in Kubernetes?"
+  - id: "troubleshooting"
+    name: "Troubleshooting"
+    description: "Help diagnose and fix issues with OpenShift clusters"
+    tags: ["troubleshooting", "debugging", "support"]
+    inputModes: ["text/plain"]
+    outputModes: ["text/plain"]
+capabilities:
+  streaming: true
+  pushNotifications: false
+  stateTransitionHistory: false
+defaultInputModes: ["text/plain"]
+defaultOutputModes: ["text/plain"]
+security:
+  - bearer: []
+security_schemes:
+  bearer:
+    type: http
+    scheme: bearer
+```
+
+#### Option 2: Inline Configuration
+
+Alternatively, configure the agent card directly in the main configuration file via `customization.agent_card_config`:
 
 ```yaml
 customization:
@@ -143,6 +195,66 @@ authorization:
         - A2A_JSONRPC
 ```
 
+### Persistent State Storage (Multi-Worker Deployments)
+
+By default, A2A state (task store and context-to-conversation mappings) is stored in memory. This works well for single-worker deployments but causes issues in multi-worker deployments where:
+
+- Subsequent requests may hit different workers
+- Task state and conversation history are lost between workers
+- State is lost on service restarts
+
+For production multi-worker deployments, configure persistent storage using the `a2a_state` section:
+
+#### In-Memory Storage (Default)
+
+```yaml
+a2a_state: {}
+```
+
+This is the default. Suitable for single-worker deployments or development.
+
+#### SQLite Storage
+
+```yaml
+a2a_state:
+  sqlite:
+    db_path: "/var/lib/lightspeed/a2a_state.db"
+```
+
+SQLite is suitable for:
+- Single-worker deployments that need persistence across restarts
+- Multi-worker deployments with a shared filesystem (e.g., NFS, EFS)
+
+#### PostgreSQL Storage
+
+```yaml
+a2a_state:
+  postgres:
+    host: "postgres.example.com"
+    port: 5432
+    db: "lightspeed"
+    user: "lightspeed"
+    password: "secret"
+    ssl_mode: "require"
+```
+
+PostgreSQL is recommended for:
+- Multi-worker deployments with multiple replicas
+- High-availability production deployments
+- Scenarios requiring horizontal scaling
+
+#### What Gets Persisted
+
+The A2A state storage persists:
+
+1. **Task Store**: All A2A task objects, enabling task state queries and resumption
+2. **Context-to-Conversation Mappings**: Maps A2A `contextId` to Llama Stack `conversation_id` for multi-turn conversations
+
+This ensures that:
+- Multi-turn conversations work correctly across workers
+- Task state is queryable regardless of which worker handles the request
+- Service restarts don't lose conversation context
+
 ## Agent Card Structure
 
 The agent card describes the agent's capabilities:
@@ -200,7 +312,7 @@ The `A2AAgentExecutor` class implements the A2A `AgentExecutor` interface:
 
 ### Event Flow
 
-```
+```text
 A2A Request
     │
     ▼
@@ -252,9 +364,11 @@ A2A Request
 The A2A implementation supports multi-turn conversations:
 
 1. Each A2A `contextId` maps to a Llama Stack `conversation_id`
-2. The mapping is stored in memory (`_CONTEXT_TO_CONVERSATION`)
+2. The mapping is stored in the configured A2A context store (memory, SQLite, or PostgreSQL)
 3. Subsequent messages with the same `contextId` continue the conversation
 4. Conversation history is preserved across turns
+
+For multi-worker deployments, configure persistent storage (see [Persistent State Storage](#persistent-state-storage-multi-worker-deployments)) to ensure context mappings are shared across all workers.
 
 ## Testing with A2A Inspector
 

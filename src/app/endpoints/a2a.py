@@ -30,7 +30,7 @@ from a2a.types import (
 from a2a.server.agent_execution import AgentExecutor, RequestContext
 from a2a.server.events import EventQueue
 from a2a.server.request_handlers import DefaultRequestHandler
-from a2a.server.tasks import InMemoryTaskStore
+from a2a.server.tasks import TaskStore
 from a2a.server.tasks.task_updater import TaskUpdater
 from a2a.server.apps import A2AStarletteApplication
 from a2a.utils import new_agent_text_message, new_task
@@ -39,6 +39,7 @@ from authentication.interface import AuthTuple
 from authentication import get_auth_dependency
 from authorization.middleware import authorize
 from configuration import configuration
+from a2a_storage import A2AStorageFactory, A2AContextStore
 from models.config import Action
 from models.requests import QueryRequest
 from app.endpoints.query import (
@@ -60,12 +61,37 @@ auth_dependency = get_auth_dependency()
 # -----------------------------
 # Persistent State (multi-turn)
 # -----------------------------
-# Keep a single TaskStore instance so tasks persist across requests and
-# previous messages remain connected to the current request.
-_TASK_STORE = InMemoryTaskStore()
+# Task store and context store are created lazily based on configuration.
+# For multi-worker deployments, configure 'a2a_state' with 'sqlite' or 'postgres'
+# to share state across workers.
+_TASK_STORE: TaskStore | None = None
+_CONTEXT_STORE: A2AContextStore | None = None
 
-# Map A2A contextId -> Llama Stack conversationId to preserve history across turns
-_CONTEXT_TO_CONVERSATION: dict[str, str] = {}
+
+async def _get_task_store() -> TaskStore:
+    """Get the A2A task store, creating it if necessary.
+
+    Returns:
+        TaskStore instance based on configuration.
+    """
+    global _TASK_STORE  # pylint: disable=global-statement
+    if _TASK_STORE is None:
+        _TASK_STORE = await A2AStorageFactory.create_task_store(configuration.a2a_state)
+    return _TASK_STORE
+
+
+async def _get_context_store() -> A2AContextStore:
+    """Get the A2A context store, creating it if necessary.
+
+    Returns:
+        A2AContextStore instance based on configuration.
+    """
+    global _CONTEXT_STORE  # pylint: disable=global-statement
+    if _CONTEXT_STORE is None:
+        _CONTEXT_STORE = await A2AStorageFactory.create_context_store(
+            configuration.a2a_state
+        )
+    return _CONTEXT_STORE
 
 
 def _convert_responses_content_to_a2a_parts(output: list[Any]) -> list[Part]:
@@ -261,7 +287,8 @@ class A2AAgentExecutor(AgentExecutor):
 
         # Resolve conversation_id from A2A contextId for multi-turn
         a2a_context_id = context_id
-        conversation_id = _CONTEXT_TO_CONVERSATION.get(a2a_context_id)
+        context_store = await _get_context_store()
+        conversation_id = await context_store.get(a2a_context_id)
         logger.info(
             "A2A contextId %s maps to conversation_id %s",
             a2a_context_id,
@@ -299,7 +326,7 @@ class A2AAgentExecutor(AgentExecutor):
 
         # Persist conversation_id for next turn in same A2A context
         if conversation_id:
-            _CONTEXT_TO_CONVERSATION[a2a_context_id] = conversation_id
+            await context_store.set(a2a_context_id, conversation_id)
             logger.info(
                 "Persisted conversation_id %s for A2A contextId %s",
                 conversation_id,
@@ -593,7 +620,9 @@ async def get_agent_card(  # pylint: disable=unused-argument
         raise
 
 
-def _create_a2a_app(auth_token: str, mcp_headers: dict[str, dict[str, str]]) -> Any:
+async def _create_a2a_app(
+    auth_token: str, mcp_headers: dict[str, dict[str, str]]
+) -> Any:
     """Create an A2A Starlette application instance with auth context.
 
     Args:
@@ -604,10 +633,11 @@ def _create_a2a_app(auth_token: str, mcp_headers: dict[str, dict[str, str]]) -> 
         A2A Starlette ASGI application
     """
     agent_executor = A2AAgentExecutor(auth_token=auth_token, mcp_headers=mcp_headers)
+    task_store = await _get_task_store()
 
     request_handler = DefaultRequestHandler(
         agent_executor=agent_executor,
-        task_store=_TASK_STORE,
+        task_store=task_store,
     )
 
     a2a_app = A2AStarletteApplication(
@@ -656,7 +686,7 @@ async def handle_a2a_jsonrpc(  # pylint: disable=too-many-locals,too-many-statem
         auth_token = ""
 
     # Create A2A app with auth context
-    a2a_app = _create_a2a_app(auth_token, mcp_headers)
+    a2a_app = await _create_a2a_app(auth_token, mcp_headers)
 
     # Detect if this is a streaming request by checking the JSON-RPC method
     is_streaming_request = False

@@ -29,8 +29,8 @@ from app.endpoints.a2a import (
     get_lightspeed_agent_card,
     A2AAgentExecutor,
     TaskResultAggregator,
-    _CONTEXT_TO_CONVERSATION,
-    _TASK_STORE,
+    _get_task_store,
+    _get_context_store,
     a2a_health_check,
     get_agent_card,
 )
@@ -104,6 +104,7 @@ def setup_configuration_fixture(mocker: MockerFixture) -> AppConfig:
         },
         "authentication": {"module": "noop"},
         "authorization": {"access_rules": []},
+        "a2a_state": {},  # Empty = in-memory storage (default)
     }
     cfg = AppConfig()
     cfg.init_from_dict(config_dict)
@@ -130,6 +131,7 @@ def setup_minimal_configuration_fixture(mocker: MockerFixture) -> AppConfig:
         "customization": {},  # Empty customization, no agent_card_config
         "authentication": {"module": "noop"},
         "authorization": {"access_rules": []},
+        "a2a_state": {},  # Empty = in-memory storage (default)
     }
     cfg = AppConfig()
     cfg.init_from_dict(config_dict)
@@ -613,13 +615,42 @@ class TestA2AAgentExecutor:
 class TestContextToConversationMapping:
     """Tests for the context to conversation ID mapping."""
 
-    def test_context_to_conversation_is_dict(self) -> None:
-        """Test that _CONTEXT_TO_CONVERSATION is a dict."""
-        assert isinstance(_CONTEXT_TO_CONVERSATION, dict)
+    @pytest.mark.asyncio
+    async def test_get_context_store_returns_store(
+        self,
+        setup_configuration: AppConfig,  # pylint: disable=unused-argument
+    ) -> None:
+        """Test that _get_context_store returns a context store."""
+        # pylint: disable=import-outside-toplevel
+        # Reset module-level state and factory
+        import app.endpoints.a2a as a2a_module
+        from a2a_storage import A2AStorageFactory
 
-    def test_task_store_exists(self) -> None:
-        """Test that _TASK_STORE exists."""
-        assert _TASK_STORE is not None
+        a2a_module._context_store = None
+        a2a_module._task_store = None
+        A2AStorageFactory.reset()
+
+        store = await _get_context_store()
+        assert store is not None
+        assert store.ready() is True
+
+    @pytest.mark.asyncio
+    async def test_get_task_store_returns_store(
+        self,
+        setup_configuration: AppConfig,  # pylint: disable=unused-argument
+    ) -> None:
+        """Test that _get_task_store returns a task store."""
+        # pylint: disable=import-outside-toplevel
+        # Reset module-level state and factory
+        import app.endpoints.a2a as a2a_module
+        from a2a_storage import A2AStorageFactory
+
+        a2a_module._context_store = None
+        a2a_module._task_store = None
+        A2AStorageFactory.reset()
+
+        store = await _get_task_store()
+        assert store is not None
 
 
 # -----------------------------
